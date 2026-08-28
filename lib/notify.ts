@@ -45,7 +45,39 @@ function describe(c: DetectedChange): string {
   }
 }
 
-function buildHtml(changes: DetectedChange[], appUrl: string, runId: string): string {
+/** Tu SKU y tu precio, por publicación seguida. */
+export type OwnPriceInfo = Map<string, { sku: string; price: number | null }>;
+
+/** "+6,9% arriba" / "−4,1% abajo", o vacío si no hay con qué comparar. */
+function ownComparison(
+  c: DetectedChange,
+  own: OwnPriceInfo | undefined
+): string {
+  const info = own?.get(c.ml_id);
+  if (!info || info.price == null) return "";
+
+  const PRICE_CHANGES = new Set(["price_up", "price_down", "new_listing", "relisted"]);
+  const ref = PRICE_CHANGES.has(c.change_type)
+    ? Number(c.new_value)
+    : null;
+  if (ref === null || !Number.isFinite(ref) || ref === 0) return "";
+
+  const pct = ((info.price - ref) / ref) * 100;
+  const arriba = pct > 0;
+  const signo = arriba ? "+" : "";
+  return (
+    `<div style="color:${arriba ? "#c0392b" : "#1e8e5a"};font-size:12px;margin-top:2px">` +
+    `${escapeHtml(info.sku)}: ${fmtMoney(String(info.price))} · ` +
+    `${signo}${pct.toFixed(1)}% ${arriba ? "estás arriba" : "estás abajo"}</div>`
+  );
+}
+
+function buildHtml(
+  changes: DetectedChange[],
+  appUrl: string,
+  runId: string,
+  own?: OwnPriceInfo
+): string {
   const byType = new Map<string, DetectedChange[]>();
   for (const c of changes) {
     if (!byType.has(c.change_type)) byType.set(c.change_type, []);
@@ -69,6 +101,7 @@ function buildHtml(changes: DetectedChange[], appUrl: string, runId: string): st
             <td style="padding:8px 10px;border-bottom:1px solid #eee;font-size:13px">
               <div style="color:#6b7684;font-size:11px;text-transform:uppercase;letter-spacing:.04em">${escapeHtml(c.brand ?? "")}${c.seller ? " · " + escapeHtml(c.seller) : ""}</div>
               ${title}
+              ${ownComparison(c, own)}
             </td>
             <td style="padding:8px 10px;border-bottom:1px solid #eee;font-size:13px;white-space:nowrap;text-align:right">${escapeHtml(describe(c))}</td>
           </tr>`;
@@ -107,7 +140,8 @@ function escapeHtml(s: string): string {
  */
 export async function sendAlertEmail(
   changes: DetectedChange[],
-  runId: string
+  runId: string,
+  own?: OwnPriceInfo
 ): Promise<{ sent: boolean; reason?: string }> {
   const relevant = changes.filter((c) => ALERT_TYPES.has(c.change_type));
   if (relevant.length === 0) return { sent: false, reason: "sin cambios relevantes" };
@@ -126,7 +160,7 @@ export async function sendAlertEmail(
       from,
       to: to.split(",").map((s) => s.trim()),
       subject: `ML competencia: ${relevant.length} cambio${relevant.length === 1 ? "" : "s"} detectado${relevant.length === 1 ? "" : "s"}`,
-      html: buildHtml(relevant, appUrl, runId),
+      html: buildHtml(relevant, appUrl, runId, own),
     });
     return { sent: true };
   } catch (err) {

@@ -13,6 +13,12 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { parseCsv, parsePrice, colIndex, getSkuList, resetSkuCache } from "../lib/skus";
 
+/** Misma cuenta que hace la app para mostrar la diferencia. */
+function diffPct(own, competencia) {
+  if (own == null || competencia == null || competencia === 0) return null;
+  return Number((((own - competencia) / competencia) * 100).toFixed(1));
+}
+
 let passed = 0;
 let failed = 0;
 
@@ -209,6 +215,31 @@ await test("cachea para no pedirle el CSV a Google en cada click", async () => {
   await getSkuList();
   await getSkuList();
   assert.equal(hits, 1, `pidio el CSV ${hits} veces`);
+});
+
+// ---------------------------------------------------------------
+console.log("\n== Diferencia contra la competencia ==");
+
+await test("estar mas caro da porcentaje positivo", () => {
+  assert.equal(diffPct(68000, 63599), 6.9);
+});
+
+await test("estar mas barato da porcentaje negativo", () => {
+  assert.equal(diffPct(59000, 63599), -7.2);
+});
+
+await test("mismo precio da cero", () => {
+  assert.equal(diffPct(63599, 63599), 0);
+});
+
+await test("sin precio propio no se inventa una diferencia", () => {
+  // Es el caso de un SKU sin precio cargado en el Sheet.
+  assert.equal(diffPct(null, 63599), null);
+});
+
+await test("sin precio de competencia tampoco", () => {
+  assert.equal(diffPct(68000, null), null);
+  assert.equal(diffPct(68000, 0), null);
 });
 
 // ---------------------------------------------------------------

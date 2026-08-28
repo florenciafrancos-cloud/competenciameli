@@ -3,6 +3,7 @@ import { sql } from "@/lib/db";
 import { ensureSchema } from "@/lib/ensure-schema";
 import { runIngest, IngestError, type Query } from "@/lib/ingest-core";
 import { sendAlertEmail } from "@/lib/notify";
+import { buildOwnPriceMap } from "@/lib/own-prices";
 import type { IngestPayload } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -45,7 +46,7 @@ export async function POST(req: Request) {
 
     const mail = result.first_run
       ? { sent: false, reason: "primera carga: se omite el email de alerta" }
-      : await sendAlertEmail(result.changes, result.run_id);
+      : await sendAlertEmail(result.changes, result.run_id, await buildOwnPriceMap(query));
 
     // No devolvemos `changes` completo para no inflar la respuesta.
     const { changes, ...summary } = result;

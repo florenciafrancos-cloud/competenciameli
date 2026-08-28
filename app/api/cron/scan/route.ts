@@ -3,6 +3,7 @@ import { sql } from "@/lib/db";
 import { ensureSchema } from "@/lib/ensure-schema";
 import { runScan } from "@/lib/scan";
 import { sendAlertEmail } from "@/lib/notify";
+import { buildOwnPriceMap } from "@/lib/own-prices";
 import type { Query } from "@/lib/ingest-core";
 
 export const runtime = "nodejs";
@@ -50,7 +51,7 @@ export async function GET(req: Request) {
     const ingest = report.ingest!;
     const mail = ingest.first_run
       ? { sent: false, reason: "primera carga: se omite el email de alerta" }
-      : await sendAlertEmail(ingest.changes, ingest.run_id);
+      : await sendAlertEmail(ingest.changes, ingest.run_id, await buildOwnPriceMap(query));
 
     const { changes, ...summary } = ingest;
     return NextResponse.json({

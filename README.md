@@ -225,12 +225,20 @@ En el Sheet donde tenés tu catálogo: **Archivo → Compartir → Publicar en l
 web → elegí la hoja** (no "Todo el documento") **→ CSV → Publicar**. Copiá la
 URL y ponela en `SHEET_CSV_URL`.
 
-A partir de ahí, cuando agregás un producto podés elegir tu SKU de una lista,
-y el tablero muestra:
+A partir de ahí, cuando agregás un producto podés **buscar tu SKU** — escribís
+el código o parte del nombre y filtra, porque un desplegable con 146 opciones
+no sirve para encontrar nada. El tablero muestra:
 
 | Producto | Mejor precio ML | Tu SKU | Tu precio | Diferencia |
 |---|---|---|---|---|
 | Bubba Dual Sip 1.53L | $63.599 | P02.015 | $68.000 | **+6,9% estás arriba** |
+
+La misma comparación aparece en la pestaña **Cambios** y en el mail de alerta:
+cada aviso te dice qué hizo la competencia y dónde quedaste vos.
+
+> **Bajó el precio** · Bubba Dual Sip 1.53L
+> $63.599 → $59.900 (−5,8%)
+> P02.015: $68.000 · **+13,5% estás arriba**
 
 También se puede asignar o cambiar el SKU de un producto que ya venías
 siguiendo, desde la misma tabla.
@@ -294,7 +302,7 @@ cadena de conexión la saca de Vercel → Storage → tu base → `.env.local`).
 
 ### Tests
 
-Hay **145 tests**. Necesitan un Postgres local:
+Hay **150 tests**. Necesitan un Postgres local:
 
 ```bash
 npm test
@@ -355,7 +363,7 @@ lib/
   db.ts                     Conexión a Postgres
   auth.ts                   Sesión del tablero
 db/schema.sql               Las tablas y las migraciones
-tests/                      145 tests
+tests/                      150 tests
 vercel.json                 El horario del cron
 ```
 

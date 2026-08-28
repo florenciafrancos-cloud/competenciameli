@@ -1,6 +1,6 @@
 "use client";
 
-import { Fragment, useCallback, useEffect, useState } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import {
   CHANGE_LABELS,
   CHANGE_ORDER,
@@ -691,6 +691,9 @@ export default function Home() {
                   <th>Publicación</th>
                   <th>Vendedor</th>
                   <th style={{ textAlign: "right" }}>Detalle</th>
+                  <th>Tu SKU</th>
+                  <th style={{ textAlign: "right" }}>Tu precio</th>
+                  <th style={{ textAlign: "right" }}>Diferencia</th>
                 </tr>
               </thead>
               <tbody>
@@ -754,6 +757,20 @@ export default function Home() {
                           {c.new_value ?? "—"}
                         </span>
                       )}
+                    </td>
+                    <td className="muted text-[12px] tabular whitespace-nowrap">
+                      {(c as any).sku ?? "—"}
+                    </td>
+                    <td className="tabular text-right whitespace-nowrap">
+                      {(c as any).own_price != null
+                        ? money((c as any).own_price)
+                        : "—"}
+                    </td>
+                    <td className="tabular text-right whitespace-nowrap">
+                      <Diferencia
+                        diffAbs={(c as any).diff_abs}
+                        diffPct={(c as any).diff_pct}
+                      />
                     </td>
                   </tr>
                 ))}
@@ -1194,6 +1211,13 @@ export default function Home() {
   );
 }
 
+/**
+ * Buscador de SKU.
+ *
+ * Un <select> con 146 opciones es inusable: hay que escribir para encontrar.
+ * Filtra por código y por nombre a la vez, porque a veces te acordás del
+ * producto y no del código.
+ */
 function SkuSelect({
   value,
   skus,
@@ -1205,31 +1229,128 @@ function SkuSelect({
   onChange: (sku: string) => void;
   compact?: boolean;
 }) {
+  const [open, setOpen] = useState(false);
+  const [q, setQ] = useState("");
+  const boxRef = useRef<HTMLDivElement>(null);
+
   const chosen = skus.find((s) => s.sku === value);
+
+  // Cerrar al hacer click afuera.
+  useEffect(() => {
+    if (!open) return;
+    function onDoc(e: MouseEvent) {
+      if (boxRef.current && !boxRef.current.contains(e.target as Node)) {
+        setOpen(false);
+      }
+    }
+    document.addEventListener("mousedown", onDoc);
+    return () => document.removeEventListener("mousedown", onDoc);
+  }, [open]);
+
+  const needle = q.trim().toLowerCase();
+  const matches = needle
+    ? skus.filter(
+        (s) =>
+          s.sku.toLowerCase().includes(needle) ||
+          (s.label ?? "").toLowerCase().includes(needle)
+      )
+    : skus;
+  const shown = matches.slice(0, 60);
+
+  function pick(sku: string) {
+    onChange(sku);
+    setOpen(false);
+    setQ("");
+  }
+
+  if (!open) {
+    return (
+      <span className="inline-flex items-center gap-2">
+        <button
+          onClick={() => setOpen(true)}
+          className={`rounded-md border hairline text-left ${
+            compact ? "px-2 py-1 text-[12px]" : "px-3 py-2 text-[13px]"
+          }`}
+        >
+          {chosen ? (
+            <>
+              <span className="tabular">{chosen.sku}</span>
+              {chosen.price != null && (
+                <span className="muted"> · {money(chosen.price)}</span>
+              )}
+            </>
+          ) : (
+            <span className="muted">Buscar SKU…</span>
+          )}
+        </button>
+        {chosen && (
+          <button
+            onClick={() => onChange("")}
+            className="muted text-[12px]"
+            title="Quitar el SKU"
+          >
+            ×
+          </button>
+        )}
+      </span>
+    );
+  }
+
   return (
-    <span className="inline-flex items-center gap-2">
-      <select
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
+    <div ref={boxRef} className="relative inline-block align-top">
+      <input
+        autoFocus
+        value={q}
+        onChange={(e) => setQ(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Escape") setOpen(false);
+          if (e.key === "Enter" && shown.length > 0) pick(shown[0].sku);
+        }}
+        placeholder="Código o nombre…"
         className={`rounded-md border hairline bg-transparent ${
-          compact ? "px-1.5 py-1 text-[12px]" : "px-2 py-2 text-[13px]"
+          compact ? "px-2 py-1 text-[12px] w-44" : "px-3 py-2 text-[13px] w-64"
         }`}
+      />
+      <div
+        className="absolute z-20 mt-1 w-80 max-h-72 overflow-y-auto card shadow-lg"
+        style={{ boxShadow: "0 8px 24px rgba(0,0,0,.12)" }}
       >
-        <option value="">— sin SKU —</option>
-        {skus.map((s) => (
-          <option key={s.sku} value={s.sku}>
-            {s.sku}
-            {s.label ? ` · ${s.label}` : ""}
-            {s.price != null ? ` · ${money(s.price)}` : " · sin precio"}
-          </option>
-        ))}
-      </select>
-      {chosen && (
-        <span className="muted text-[12px] tabular whitespace-nowrap">
-          {chosen.price != null ? money(chosen.price) : "sin precio"}
-        </span>
-      )}
-    </span>
+        {shown.length === 0 ? (
+          <p className="muted text-[12px] p-3">Ningún SKU coincide con “{q}”.</p>
+        ) : (
+          <>
+            <button
+              onClick={() => pick("")}
+              className="w-full text-left px-3 py-2 text-[12px] muted hover:bg-black/[.04]"
+            >
+              — sin SKU —
+            </button>
+            {shown.map((s) => (
+              <button
+                key={s.sku}
+                onClick={() => pick(s.sku)}
+                className={`w-full text-left px-3 py-2 text-[12px] hover:bg-black/[.04] ${
+                  s.sku === value ? "subtle" : ""
+                }`}
+              >
+                <div className="flex items-baseline justify-between gap-2">
+                  <span className="tabular font-medium">{s.sku}</span>
+                  <span className="muted tabular whitespace-nowrap">
+                    {s.price != null ? money(s.price) : "sin precio"}
+                  </span>
+                </div>
+                {s.label && <div className="muted">{s.label}</div>}
+              </button>
+            ))}
+            {matches.length > shown.length && (
+              <p className="muted text-[11px] px-3 py-2">
+                {matches.length - shown.length} más. Escribí para filtrar.
+              </p>
+            )}
+          </>
+        )}
+      </div>
+    </div>
   );
 }
 

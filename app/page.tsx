@@ -136,6 +136,12 @@ export default function Home() {
   const [newKind, setNewKind] = useState("brand");
   const [saving, setSaving] = useState(false);
 
+  // creacion de tablas
+  const [settingUp, setSettingUp] = useState(false);
+  const [setupMsg, setSetupMsg] = useState<{ ok: boolean; text: string } | null>(
+    null
+  );
+
   // relevamiento a demanda
   const [scanning, setScanning] = useState(false);
   const [scanMsg, setScanMsg] = useState<{ ok: boolean; text: string } | null>(
@@ -184,6 +190,34 @@ export default function Home() {
     () => (stats?.by_brand ?? []).map((b: any) => b.brand),
     [stats]
   );
+
+  async function setupTables() {
+    setSettingUp(true);
+    setSetupMsg(null);
+    try {
+      const res = await fetch("/api/setup", { method: "POST" });
+      const d = await res.json();
+      if (!res.ok || d.ok === false) {
+        setSetupMsg({
+          ok: false,
+          text: d.error ?? "No se pudieron crear las tablas.",
+        });
+      } else {
+        setSetupMsg({
+          ok: true,
+          text: `Listo: ${d.tables?.length ?? 0} tablas creadas. Ahora autorizá Mercado Libre en /api/ml/auth y después apretá "Relevar ahora".`,
+        });
+        load();
+      }
+    } catch (e) {
+      setSetupMsg({
+        ok: false,
+        text: e instanceof Error ? e.message : String(e),
+      });
+    } finally {
+      setSettingUp(false);
+    }
+  }
 
   async function scanNow() {
     setScanning(true);
@@ -297,11 +331,22 @@ export default function Home() {
 
       {needsSetup && (
         <div className="card p-4 mb-6 text-[13px]">
-          <strong>Falta crear las tablas.</strong> Corré una vez:
-          <pre className="subtle rounded p-3 mt-2 overflow-x-auto text-xs">
-{`curl -X POST ${typeof window !== "undefined" ? window.location.origin : ""}/api/setup \\
-  -H "Authorization: Bearer TU_INGEST_SECRET"`}
-          </pre>
+          <strong>Falta crear las tablas.</strong>
+          <p className="muted mt-1">
+            Es el último paso de la instalación. Se puede repetir sin riesgo.
+          </p>
+          <button
+            onClick={setupTables}
+            disabled={settingUp}
+            className="mt-3 rounded-md bg-ink text-white px-3 py-1.5 disabled:opacity-40"
+          >
+            {settingUp ? "Creando las tablas…" : "Crear las tablas"}
+          </button>
+          {setupMsg && (
+            <p className={`mt-2 whitespace-pre-wrap ${setupMsg.ok ? "muted" : "text-up"}`}>
+              {setupMsg.text}
+            </p>
+          )}
         </div>
       )}
 
@@ -699,8 +744,9 @@ export default function Home() {
       )}
 
       <footer className="muted text-[12px] mt-8">
-        Los datos los carga una tarea programada de Claude que releva Mercado Libre una vez
-        por día y hace POST a <code>/api/ingest</code>.
+        Los datos se actualizan solos una vez por día a las 9:00, consultando la API
+        oficial de Mercado Libre. Para forzar una actualización, usá{" "}
+        <strong>Relevar ahora</strong>.
       </footer>
     </main>
   );

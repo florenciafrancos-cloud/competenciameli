@@ -87,6 +87,12 @@ export async function refreshAccessToken(
       }. Si el refresh_token vencio (6 meses) hay que volver a autorizar la app en /api/ml/auth.`
     );
   }
+  if (!data.access_token || !data.refresh_token) {
+    throw new Error(
+      "El refresco devolvio una respuesta incompleta de Mercado Libre " +
+        `(${JSON.stringify(data)}). Volvé a autorizar la app en /api/ml/auth.`
+    );
+  }
 
   await saveTokens(q, {
     access_token: data.access_token,
@@ -139,6 +145,27 @@ export async function exchangeCodeForTokens(
       `Mercado Libre rechazo el codigo (${r.status}): ${
         data?.message ?? JSON.stringify(data)
       }`
+    );
+  }
+
+  if (!data.access_token) {
+    throw new Error(
+      `Mercado Libre no devolvio un access_token. Respuesta: ${JSON.stringify(data)}`
+    );
+  }
+
+  // Mercado Libre solo entrega refresh_token si la aplicacion tiene el
+  // scope `offline_access` habilitado. Sin el, el permiso duraria 6 horas
+  // y el sistema no podria renovarse solo — asi que es un error, no un
+  // detalle: preferimos fallar aca con un mensaje claro antes que guardar
+  // un permiso que se va a romper esta misma tarde.
+  if (!data.refresh_token) {
+    throw new Error(
+      "Mercado Libre no devolvio un refresh_token. Falta habilitar el scope " +
+        "`offline_access` en la aplicacion: entrá a " +
+        "https://developers.mercadolibre.com.ar/devcenter, editá la aplicacion, " +
+        "marcá `offline_access` junto con `read`, guardá, y volvé a autorizar " +
+        "desde /api/ml/auth. Sin ese scope el permiso duraria solo 6 horas."
     );
   }
 

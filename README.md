@@ -54,7 +54,11 @@ Al vincularla al proyecto, Vercel carga la variable de conexión sola.
    Mercado Libre y creá una aplicación (**Crear nueva aplicación**).
 2. En **Redirect URI** poné exactamente:
    `https://TU-PROYECTO.vercel.app/api/ml/callback`
-3. En **Scopes** dejá marcado `read`.
+3. En **Scopes** marcá **`read`** y **`offline_access`**.
+
+   > `offline_access` es obligatorio. Es el scope que hace que Mercado Libre
+   > entregue un `refresh_token`; sin él el permiso dura 6 horas y el sistema
+   > no puede renovarse solo.
 4. Guardá y copiá el **App ID** (es el `client_id`) y el **Secret Key**
    (el `client_secret`).
 
@@ -90,19 +94,24 @@ entran en un deploy ya hecho).
 
 ### 5. Crear las tablas y autorizar
 
-Crear las tablas (una sola vez):
+Entrá a `https://TU-PROYECTO.vercel.app` y poné tu contraseña. La primera vez
+el tablero avisa que faltan las tablas y muestra un botón **Crear las tablas** —
+apretalo. Se puede repetir sin riesgo.
 
-```bash
-curl -X POST https://TU-PROYECTO.vercel.app/api/setup \
-  -H "Authorization: Bearer TU_INGEST_SECRET"
-```
+> También se puede por línea de comandos, si preferís:
+> ```bash
+> curl -X POST https://TU-PROYECTO.vercel.app/api/setup \
+>   -H "Authorization: Bearer TU_INGEST_SECRET"
+> ```
+> En PowerShell usá `curl.exe`, no `curl` (que ahí es otro comando).
+>
+> Y `GET /api/setup` dice qué tablas existen, sin crear nada.
 
 Autorizar la app: abrí en el navegador
 `https://TU-PROYECTO.vercel.app/api/ml/auth`, aceptá el permiso, y listo.
 Los tokens quedan guardados y el sistema los renueva solo.
 
-Entrá a `https://TU-PROYECTO.vercel.app`, poné la contraseña y apretá
-**Relevar ahora** para cargar la primera foto.
+Volvé al tablero y apretá **Relevar ahora** para cargar la primera foto.
 
 > La primera corrida no manda mail a propósito: son cientos de publicaciones
 > y todas contarían como "nuevas". A partir de la segunda, solo avisa lo que
@@ -165,7 +174,7 @@ npm run build        # verifica que compila antes de subir
 
 ### Tests
 
-Hay 56 tests. Necesitan un Postgres local:
+Hay 72 tests. Necesitan un Postgres local:
 
 ```bash
 npm test
@@ -179,6 +188,13 @@ sistema: **si el relevamiento de una marca falla, sus publicaciones NO se
 marcan como dadas de baja**. Sin esa protección, un error de red de un día
 generaría un mail avisando que la competencia dio de baja 200 publicaciones que
 en realidad siguen ahí.
+
+`tests/setup.test.mjs` ejecuta el `schema.sql` **sentencia por sentencia**, que
+es como lo corre el driver de Neon en producción. Está separado a propósito: la
+primera versión de `/api/setup` tenía un bug que descartaba en silencio todos
+los `CREATE TABLE` (los que venían precedidos por un comentario), y no se
+detectó porque los otros tests ejecutan el schema completo de una sola vez con
+el cliente `pg`, sin pasar por esa lógica.
 
 ---
 
@@ -205,9 +221,10 @@ lib/
   diff.ts                   Las reglas de qué cuenta como cambio
   notify.ts                 El mail de alerta
   db.ts                     Conexión a Postgres
+  sql-split.ts              Parte el schema.sql en sentencias
   auth.ts                   Sesión del tablero
 db/schema.sql               Las tablas
-tests/                      56 tests
+tests/                      72 tests
 vercel.json                 El horario del cron
 ```
 

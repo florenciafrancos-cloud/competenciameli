@@ -16,7 +16,12 @@ import { dirname, join } from "node:path";
 import assert from "node:assert/strict";
 import pg from "pg";
 
-import { scanBrand, saveTokens, getAccessToken } from "../lib/ml-api";
+import {
+  scanBrand,
+  saveTokens,
+  getAccessToken,
+  exchangeCodeForTokens,
+} from "../lib/ml-api";
 import { runScan, mlIdFromUrl } from "../lib/scan";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -73,6 +78,7 @@ const NOISE = [
 
 let requestLog = [];
 let failNextBrand = null;
+let omitRefreshToken = false;
 
 const server = createServer((req, res) => {
   const url = new URL(req.url, "http://localhost");
@@ -82,6 +88,13 @@ const server = createServer((req, res) => {
   // en el body, igual que la API real.
   if (url.pathname === "/oauth/token") {
     res.writeHead(200, { "Content-Type": "application/json" });
+    // Sin el scope `offline_access`, ML responde SIN refresh_token.
+    // Es exactamente lo que paso en produccion el 28/08.
+    if (omitRefreshToken) {
+      return res.end(
+        JSON.stringify({ access_token: "SOLO_ACCESS", expires_in: 21600 })
+      );
+    }
     return res.end(
       JSON.stringify({
         access_token: "NUEVO_ACCESS",
@@ -205,6 +218,38 @@ await test("solo puede existir una fila de tokens", async () => {
     q(`INSERT INTO ml_tokens (id, access_token, refresh_token, expires_at)
        VALUES (2, 'x', 'y', NOW())`)
   );
+});
+
+await test("REGRESION: falta de refresh_token da un mensaje sobre offline_access", async () => {
+  // Sin el scope `offline_access`, ML no manda refresh_token. La primera
+  // version guardaba null y el error que veia el usuario era un constraint
+  // crudo de Postgres, imposible de interpretar.
+  omitRefreshToken = true;
+  try {
+    await assert.rejects(
+      () => exchangeCodeForTokens("un-codigo", "https://app/api/ml/callback"),
+      (err) => {
+        assert.match(err.message, /offline_access/);
+        assert.match(err.message, /refresh_token/);
+        return true;
+      }
+    );
+  } finally {
+    omitRefreshToken = false;
+  }
+});
+
+await test("no guarda un permiso incompleto en la base", async () => {
+  const before = await q(`SELECT refresh_token FROM ml_tokens WHERE id = 1`);
+  omitRefreshToken = true;
+  try {
+    await exchangeCodeForTokens("un-codigo", "https://app/api/ml/callback");
+  } catch {
+    /* esperado */
+  }
+  omitRefreshToken = false;
+  const after = await q(`SELECT refresh_token FROM ml_tokens WHERE id = 1`);
+  assert.equal(after.rows[0]?.refresh_token, before.rows[0]?.refresh_token);
 });
 
 // ---------------------------------------------------------------

@@ -174,14 +174,25 @@ export function detectChanges(
     }
 
     // --- Cambio de vendedor ---
+    // Se compara por ID y por nombre. El ID es el dato confiable: el nombre
+    // depende de /users/{id}, que Mercado Libre puede no habilitar. En una
+    // ficha de catalogo esto es la señal mas valiosa: significa que otro
+    // vendedor pasó a ganar la venta.
+    const prevSellerId = num(prev.seller_id);
+    const newSellerId = num(s.seller_id ?? null);
     const prevSeller = (prev.seller ?? "").trim();
     const newSeller = (s.seller ?? "").trim();
-    if (newSeller && prevSeller && newSeller !== prevSeller) {
+
+    const idChanged =
+      prevSellerId !== null && newSellerId !== null && prevSellerId !== newSellerId;
+    const nameChanged = !!newSeller && !!prevSeller && newSeller !== prevSeller;
+
+    if (idChanged || nameChanged) {
       changes.push({
         ...base,
         change_type: "seller_change",
-        old_value: prevSeller,
-        new_value: newSeller,
+        old_value: prevSeller || (prevSellerId !== null ? `vendedor ${prevSellerId}` : null),
+        new_value: newSeller || (newSellerId !== null ? `vendedor ${newSellerId}` : null),
         delta_abs: null,
         delta_pct: null,
       });

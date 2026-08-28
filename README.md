@@ -30,6 +30,8 @@ certificadas. Verificado el 28/08/2026 contra la API real, con un token válido:
 | `/highlights/MLA/category/...` (destacados) | **403 forbidden** |
 | `/items?ids=...` (detalle de publicaciones) | **200 OK** |
 | `/items/{id}` | **200 OK** |
+| `/products/search` | **200 OK** |
+| `/products/{id}` (ficha de catálogo) | sin verificar — usá `/api/ml/diag?product=...` |
 
 Tampoco sirve leer las páginas de Mercado Libre directamente: bloquea la
 navegación automatizada — las páginas de resultados devuelven el cascarón sin
@@ -146,9 +148,37 @@ Al día siguiente (o apretando **Controlar ahora**) ya compara y avisa.
 
 Pestaña **Qué se monitorea**:
 
-- **Agregar**: pegás el link y listo. Acepta los dos formatos de URL de ML
-  (`articulo.mercadolibre.com.ar/MLA-...` y `/p/MLA...`) y también el código
-  `MLA...` pegado directo.
+- **Agregar**: pegás el link y listo.
+
+Mercado Libre tiene **dos clases de link**, y la app las trata distinto porque
+son cosas distintas:
+
+| Link | Qué sigue |
+|---|---|
+| `articulo.mercadolibre.com.ar/MLA-1234567890-...` | La publicación de **un vendedor puntual** |
+| `mercadolibre.com.ar/.../p/MLA67012657` | La **ficha de catálogo**: sigue la oferta que está ganando la venta, y avisa cuando **cambia el vendedor ganador** |
+| `mercadolibre.com.ar/.../up/MLAU4195231986?product_trigger_id=MLA74954916` | Igual que el anterior: se usa el `product_trigger_id`, porque el ID `MLAU…` no es consultable |
+| Cualquiera de los anteriores con `?wid=MLA…` | La publicación puntual que indica el `wid` |
+
+El orden en que se reconocen estos formatos importa, y fue la causa de un bug:
+buscar "el primer MLA seguido de números" en un link `/up/…` agarraba el
+`product_trigger_id` del final y lo trataba como publicación, dando un 404 sin
+explicación. Ahora se resuelve por la **forma** de la URL, no por la primera
+coincidencia. Hay un test de regresión con la URL real que lo destapó.
+
+Para monitorear competencia, la ficha de catálogo suele ser más útil: te dice
+el mejor precio del mercado para ese producto y quién lo tiene. La publicación
+individual sirve cuando querés vigilar a un vendedor específico.
+
+Confundirlas daba un error muy poco claro ("no se encontró la publicación"),
+porque el ID de una ficha de catálogo no es una publicación. Ahora la app
+detecta cuál es cuál por la forma del link.
+
+> Al 28/08/2026 la documentación de ML no documenta los endpoints de catálogo.
+> El código prueba y se adapta: si `/products/{id}` responde con
+> `buy_box_winner` lo usa; si no, intenta `/products/{id}/items` y toma la
+> oferta más barata; si ninguno está habilitado, avisa que uses el link de un
+> vendedor puntual. `/api/ml/diag?product=MLA...` dice qué habilita tu token.
 - **Dejar de seguir**: un click. No se borra el historial: si la volvés a
   agregar, la serie de precios sigue estando.
 
@@ -201,7 +231,7 @@ cadena de conexión la saca de Vercel → Storage → tu base → `.env.local`).
 
 ### Tests
 
-Hay **90 tests**. Necesitan un Postgres local:
+Hay **106 tests**. Necesitan un Postgres local:
 
 ```bash
 npm test
@@ -261,7 +291,7 @@ lib/
   db.ts                     Conexión a Postgres
   auth.ts                   Sesión del tablero
 db/schema.sql               Las tablas y las migraciones
-tests/                      90 tests
+tests/                      106 tests
 vercel.json                 El horario del cron
 ```
 

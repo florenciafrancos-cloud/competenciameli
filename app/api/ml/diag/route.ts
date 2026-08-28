@@ -57,6 +57,7 @@ export async function GET(req: Request) {
   const item = searchParams.get("item")?.trim();
   const seller = searchParams.get("seller")?.trim();
   const cat = searchParams.get("cat")?.trim() || "MLA1601";
+  const product = searchParams.get("product")?.trim();
 
   const targets: { label: string; path: string; why: string }[] = [
     {
@@ -90,6 +91,16 @@ export async function GET(req: Request) {
       why: "Otra via para encontrar productos y despues sus publicaciones.",
     },
     {
+      label: "ficha de catalogo (producto)",
+      path: `/products/${product || "MLA1"}`,
+      why: "Clave para los links del tipo /p/MLA...: si funciona, se puede seguir la ficha de catalogo y detectar cambios de precio y de vendedor ganador.",
+    },
+    {
+      label: "ofertas de una ficha de catalogo",
+      path: `/products/${product || "MLA1"}/items`,
+      why: "Alternativa si la ficha no trae buy_box_winner: lista los vendedores que compiten.",
+    },
+    {
       label: "destacados por categoria",
       path: `/highlights/MLA/category/${cat}`,
       why: "Devuelve las publicaciones mas vendidas de una categoria.",
@@ -118,9 +129,12 @@ export async function GET(req: Request) {
     token_ok: me.ok,
     user: me.ok ? { id: myId, nickname: myNick } : null,
     me_error: me.ok ? undefined : me.body,
-    hint: item
-      ? undefined
-      : "Pasá ?item=MLA... con el ID de una publicación real de la competencia para probar los endpoints de detalle, que son los más importantes.",
+    hint: [
+      item ? null : "Pasá ?item=MLA... con el ID de una publicación de un vendedor (link articulo.mercadolibre.com.ar).",
+      product ? null : "Pasá ?product=MLA... con el ID de una ficha de catálogo (link con /p/MLA...).",
+    ]
+      .filter(Boolean)
+      .join(" ") || undefined,
     resumen: {
       funcionan: works,
       prohibidos_403: forbidden,

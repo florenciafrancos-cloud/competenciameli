@@ -193,28 +193,107 @@ function requireEnv(name: string): string {
 // ---------------------------------------------------------------
 
 /**
- * Extrae el ID de publicacion de un link de Mercado Libre.
+ * Mercado Libre tiene DOS clases de link, y confundirlos es la causa de un
+ * error muy poco claro ("no se encontro la publicacion"):
  *
- * Formatos que maneja:
- *   https://articulo.mercadolibre.com.ar/MLA-1234567890-termo-bubba-_JM
- *   https://www.mercadolibre.com.ar/termo-bubba/p/MLA1234567890
- *   https://mercadolibre.com.ar/MLA1234567890
- *   MLA1234567890            (pegar el ID directo tambien vale)
- *   MLA-1234567890
+ *   item     -> la publicacion de UN vendedor puntual
+ *               https://articulo.mercadolibre.com.ar/MLA-1234567890-termo-_JM
+ *
+ *   product  -> la ficha de CATALOGO del producto, donde compiten varios
+ *               vendedores. El ID no es una publicacion.
+ *               https://www.mercadolibre.com.ar/termo-bubba/p/MLA67012657
+ *
+ * Seguir una ficha de catalogo es mas util para monitorear competencia:
+ * avisa cuando cambia el precio y tambien cuando cambia QUE VENDEDOR esta
+ * ganando la venta.
  */
-export function parseMlId(input: string): string | null {
+export type MlLinkKind = "item" | "product";
+
+export type ParsedMlLink = {
+  id: string;
+  kind: MlLinkKind;
+};
+
+/**
+ * Reconoce un link (o un ID pegado directo) y dice de que clase es.
+ *
+ * Formatos reales que Mercado Libre usa (los tres aparecieron en uso):
+ *
+ *   1. Publicacion de un vendedor
+ *      https://articulo.mercadolibre.com.ar/MLA-1234567890-termo-_JM
+ *
+ *   2. Ficha de catalogo
+ *      https://www.mercadolibre.com.ar/termo/p/MLA67012657
+ *
+ *   3. "User product" (agrupador nuevo de ML). El ID empieza con MLAU y no
+ *      se puede consultar, pero la URL trae el producto de catalogo en
+ *      product_trigger_id:
+ *      https://www.mercadolibre.com.ar/termo/up/MLAU4195231986?product_trigger_id=MLA74954916
+ *
+ * El orden de las reglas importa: en el caso 3, buscar "el primer MLA con
+ * numeros" agarraba el product_trigger_id y lo trataba como publicacion,
+ * lo que daba un 404 confuso. Por eso se resuelve por forma de URL, no por
+ * la primera coincidencia.
+ *
+ * Tambien se respeta `wid=MLA...`, que en una pagina de catalogo identifica
+ * la publicacion puntual que se esta mirando.
+ */
+export function parseMlLink(input: string): ParsedMlLink | null {
   const text = (input ?? "").trim();
   if (!text) return null;
 
-  // Un ID pegado directo.
-  const direct = text.match(/^(ML[A-Z])-?(\d{6,})$/i);
-  if (direct) return `${direct[1].toUpperCase()}${direct[2]}`;
+  // ID pegado directo: no hay URL de donde inferir la clase.
+  const direct = text.match(/^(ML[A-Z])(U?)-?(\d{4,})$/i);
+  if (direct) {
+    const prefix = direct[1].toUpperCase();
+    // MLAU = user product: no es consultable por si mismo.
+    if (direct[2]) return null;
+    return { id: `${prefix}${direct[3]}`, kind: "item" };
+  }
 
-  // Dentro de una URL. Tomamos la primera aparicion.
-  const inUrl = text.match(/(ML[A-Z])-?(\d{6,})/i);
-  if (inUrl) return `${inUrl[1].toUpperCase()}${inUrl[2]}`;
+  const isCatalogPage = /\/(p|up)\//i.test(text);
+
+  // En una pagina de catalogo, `wid` apunta a la publicacion concreta.
+  const wid = text.match(/[?&]wid=(ML[A-Z])-?(\d{6,})/i);
+  if (wid) {
+    return { id: `${wid[1].toUpperCase()}${wid[2]}`, kind: "item" };
+  }
+
+  // Ficha de catalogo clasica: /p/MLA...
+  const p = text.match(/\/p\/(ML[A-Z])-?(\d{4,})/i);
+  if (p) {
+    return { id: `${p[1].toUpperCase()}${p[2]}`, kind: "product" };
+  }
+
+  // Link /up/MLAU...: el producto de catalogo viene en product_trigger_id.
+  const trigger = text.match(/[?&]product_trigger_id=(ML[A-Z])-?(\d{4,})/i);
+  if (trigger && isCatalogPage) {
+    return { id: `${trigger[1].toUpperCase()}${trigger[2]}`, kind: "product" };
+  }
+
+  // Publicacion dentro de una URL: MLA-1234567890 (con guion) o /MLA1234567890.
+  const item =
+    text.match(/(ML[A-Z])-(\d{6,})/i) ||
+    text.match(/\/(ML[A-Z])(\d{6,})/i);
+  if (item) {
+    return { id: `${item[1].toUpperCase()}${item[2]}`, kind: "item" };
+  }
+
+  // Un /up/ sin product_trigger_id no se puede resolver: hay que pedir otro link.
+  if (/\/up\/ML[A-Z]U/i.test(text)) return null;
+
+  // Ultimo recurso: cualquier MLA con numeros suficientes.
+  const loose = text.match(/(ML[A-Z])-?(\d{6,})/i);
+  if (loose) {
+    return { id: `${loose[1].toUpperCase()}${loose[2]}`, kind: "item" };
+  }
 
   return null;
+}
+
+/** Compatibilidad: devuelve solo el ID. */
+export function parseMlId(input: string): string | null {
+  return parseMlLink(input)?.id ?? null;
 }
 
 // ---------------------------------------------------------------
@@ -492,11 +571,17 @@ export async function fetchItems(
  */
 export async function previewItem(
   mlId: string,
-  token: string
+  token: string,
+  kind: MlLinkKind = "item"
 ): Promise<
   | { ok: true; listing: ScrapedListing }
   | { ok: false; error: string }
 > {
+  if (kind === "product") {
+    const r = await fetchCatalogProduct(mlId, token);
+    return r.ok ? { ok: true, listing: r.listing } : { ok: false, error: r.error };
+  }
+
   const res = await mlFetch(`/items/${mlId}`, token);
   if (res.status === 404) {
     return {
@@ -525,4 +610,161 @@ export async function previewItem(
   const inst = await fetchInstallments(mlId, token);
 
   return { ok: true, listing: toListing(item, nick, inst) };
+}
+
+// ---------------------------------------------------------------
+// Fichas de catálogo (buy box)
+// ---------------------------------------------------------------
+
+/**
+ * Datos de una ficha de catalogo: el producto y la oferta que esta ganando.
+ *
+ * OJO: al 28/08/2026 la documentacion de Mercado Libre no documenta estos
+ * endpoints, asi que el codigo prueba y se adapta:
+ *   - si /products/{id} responde con buy_box_winner, lo usa
+ *   - si no, intenta /products/{id}/items y toma la oferta mas barata
+ *   - si ninguno responde, devuelve un error explicando que hay que usar
+ *     el link de un vendedor puntual
+ *
+ * Se prefiere no adivinar: `/api/ml/diag?product=...` dice cual de los dos
+ * camimos habilita el token.
+ */
+export type CatalogResult =
+  | { ok: true; listing: ScrapedListing; winnerItemId: string | null }
+  | { ok: false; error: string; status: number };
+
+export async function fetchCatalogProduct(
+  productId: string,
+  token: string
+): Promise<CatalogResult> {
+  const prod = await mlFetch(`/products/${productId}`, token);
+
+  if (prod.status === 404) {
+    return {
+      ok: false,
+      status: 404,
+      error: `Mercado Libre no encontró el producto de catálogo ${productId}.`,
+    };
+  }
+
+  if (prod.ok && prod.data) {
+    const winner = prod.data.buy_box_winner;
+    if (winner && (winner.price ?? 0) > 0) {
+      return {
+        ok: true,
+        winnerItemId: winner.item_id ?? null,
+        listing: await catalogToListing(productId, prod.data, winner, token),
+      };
+    }
+
+    // Respondio, pero sin ganador declarado: probamos la lista de ofertas.
+    const items = await mlFetch(`/products/${productId}/items`, token);
+    if (items.ok && Array.isArray(items.data?.results)) {
+      const offers = items.data.results
+        .map((r: any) => ({
+          item_id: r.item_id ?? r.id,
+          price: r.price,
+          seller_id: r.seller_id,
+          available_quantity: r.available_quantity,
+        }))
+        .filter((o: any) => (o.price ?? 0) > 0)
+        .sort((a: any, b: any) => a.price - b.price);
+
+      if (offers.length > 0) {
+        return {
+          ok: true,
+          winnerItemId: offers[0].item_id ?? null,
+          listing: await catalogToListing(productId, prod.data, offers[0], token),
+        };
+      }
+    }
+
+    return {
+      ok: false,
+      status: 200,
+      error:
+        `Mercado Libre devolvió la ficha de catálogo ${productId} pero sin ninguna oferta con precio. ` +
+        `Puede que el producto no tenga vendedores activos. Probá con el link de un vendedor puntual.`,
+    };
+  }
+
+  // El endpoint de catalogo no esta habilitado para este token.
+  return {
+    ok: false,
+    status: prod.status,
+    error:
+      `Mercado Libre no permite consultar fichas de catálogo con este token ` +
+      `(respondió ${prod.status} en /products/${productId}). ` +
+      `Usá el link de un vendedor puntual: en la página del producto, entrá a la ` +
+      `oferta de un vendedor y copiá esa URL (empieza con articulo.mercadolibre.com.ar).`,
+  };
+}
+
+async function catalogToListing(
+  productId: string,
+  product: any,
+  winner: any,
+  token: string
+): Promise<ScrapedListing> {
+  const sellers = new SellerResolver(token);
+  const nick = await sellers.nickname(winner.seller_id);
+
+  const price = Number(winner.price);
+  const listPrice =
+    winner.original_price && winner.original_price > price
+      ? Number(winner.original_price)
+      : null;
+
+  // Las cuotas se consultan sobre la publicacion ganadora, no sobre el producto.
+  const inst = winner.item_id
+    ? await fetchInstallments(String(winner.item_id), token)
+    : { has: null, text: null };
+
+  const brandAttr = (product.attributes ?? []).find(
+    (a: any) => a.id === "BRAND" || a.name?.toLowerCase() === "marca"
+  );
+
+  return {
+    ml_id: productId,
+    title: (product.name ?? productId).toString().trim(),
+    brand: (brandAttr?.value_name ?? "").toString().trim(),
+    url: product.permalink ?? null,
+    seller: nick,
+    seller_id: winner.seller_id ?? null,
+    official_store: null,
+    list_price: listPrice,
+    price,
+    discount_pct:
+      listPrice && listPrice > price
+        ? Number((((listPrice - price) / listPrice) * 100).toFixed(2))
+        : null,
+    has_installments: inst.has,
+    installments_text: inst.text,
+    currency: winner.currency_id ?? "ARS",
+    ml_status: product.status ?? null,
+    available_quantity: winner.available_quantity ?? null,
+  };
+}
+
+/** Consulta varias fichas de catalogo. */
+export async function fetchCatalogProducts(
+  productIds: string[],
+  token: string
+): Promise<FetchItemsResult> {
+  const listings: ScrapedListing[] = [];
+  const notFound: string[] = [];
+  const warnings: string[] = [];
+
+  for (const id of [...new Set(productIds)]) {
+    const r = await fetchCatalogProduct(id, token);
+    if (r.ok) {
+      listings.push(r.listing);
+    } else if (r.status === 404) {
+      notFound.push(id);
+    } else {
+      warnings.push(`${id}: ${r.error}`);
+    }
+  }
+
+  return { listings, notFound, warnings };
 }

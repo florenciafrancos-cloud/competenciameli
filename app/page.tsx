@@ -218,7 +218,12 @@ export default function Home() {
   }, [load]);
 
   const activos = watchlist.filter((w) => w.active);
-  const needsSetup = err && /relation .* does not exist/i.test(err);
+  // Falta correr el schema: puede faltar una TABLA (instalacion nueva) o una
+  // COLUMNA (base creada con una version anterior). Los dos casos se arreglan
+  // con el mismo boton, asi que los detectamos juntos.
+  const needsSetup =
+    !!err &&
+    /(relation|column|table) .* does not exist/i.test(err);
   const needsAuth = scanMsg && /api\/ml\/auth/.test(scanMsg.text);
 
   async function setupTables() {
@@ -295,7 +300,9 @@ export default function Home() {
       } else {
         setAddMsg({
           ok: true,
-          text: `Agregada: ${d.listing.title} — ${money(d.listing.price)}${
+          text: `Agregada (${
+            d.kind === "product" ? "ficha de catálogo" : "publicación"
+          }): ${d.listing.title} — ${money(d.listing.price)}${
             d.listing.seller ? ` · ${d.listing.seller}` : ""
           }`,
         });
@@ -366,10 +373,12 @@ export default function Home() {
 
       {needsSetup && (
         <div className="card p-4 mb-6 text-[13px]">
-          <strong>Falta crear las tablas.</strong>
+          <strong>La base necesita actualizarse.</strong>
           <p className="muted mt-1">
-            Es el último paso de la instalación. Se puede repetir sin riesgo.
+            Falta crear una tabla o una columna. Se puede repetir sin riesgo:
+            no borra datos ni historial.
           </p>
+          <p className="muted mt-1 text-[12px]">Detalle: {err}</p>
           <button
             onClick={setupTables}
             disabled={settingUp}
@@ -428,6 +437,10 @@ export default function Home() {
             Pegá el link de una publicación de la competencia en Mercado Libre.
             Todos los días se controla sola y te avisa por mail si cambia el
             precio, las cuotas, el vendedor, o si se pausa o se da de baja.
+            Sirven los dos tipos de link: el de un vendedor puntual
+            (<code>articulo.mercadolibre.com.ar/MLA-…</code>) y el de la ficha
+            de catálogo (<code>…/p/MLA…</code>), donde además te avisa cuando
+            cambia qué vendedor está ganando la venta.
           </p>
           <div className="flex gap-2 flex-wrap items-center text-[13px]">
             <input
@@ -753,6 +766,12 @@ export default function Home() {
             Pegá el link de una publicación de Mercado Libre. Se verifica al
             instante contra ML, así sabés en el momento si el link está bien.
           </p>
+          <p className="muted text-[12px] mb-4 max-w-2xl">
+            <strong>Ficha de catálogo</strong> (<code>…/p/MLA…</code>): sigue la
+            oferta que está ganando, y avisa si cambia el vendedor.{" "}
+            <strong>Publicación</strong> (<code>articulo.…/MLA-…</code>): sigue a
+            ese vendedor puntual.
+          </p>
 
           <div className="flex gap-2 flex-wrap items-center mb-2 text-[13px]">
             <input
@@ -781,7 +800,7 @@ export default function Home() {
               <thead>
                 <tr>
                   <th>Publicación</th>
-                  <th>ID</th>
+                  <th>ID / tipo</th>
                   <th style={{ textAlign: "right" }}>Último precio</th>
                   <th>Estado</th>
                   <th></th>
@@ -808,7 +827,12 @@ export default function Home() {
                             w.title || w.label
                           )}
                         </td>
-                        <td className="muted text-[12px] tabular">{w.ml_id}</td>
+                        <td className="muted text-[12px] tabular">
+                          {w.ml_id}
+                          <div className="text-[11px]">
+                            {w.id_kind === "product" ? "catálogo" : "publicación"}
+                          </div>
+                        </td>
                         <td className="tabular text-right whitespace-nowrap">
                           {money(w.price)}
                         </td>
@@ -850,9 +874,25 @@ export default function Home() {
       )}
 
       <footer className="muted text-[12px] mt-8 max-w-2xl">
-        El control corre solo una vez por día a las 9:00, consultando la API
-        oficial de Mercado Libre publicación por publicación. Para adelantarlo,
-        usá <strong>Controlar ahora</strong>.
+        <p>
+          El control corre solo una vez por día a las 9:00, consultando la API
+          oficial de Mercado Libre publicación por publicación. Para adelantarlo,
+          usá <strong>Controlar ahora</strong>.
+        </p>
+        {!needsSetup && (
+          <p className="mt-3">
+            <button
+              onClick={setupTables}
+              disabled={settingUp}
+              className="underline decoration-dotted disabled:opacity-40"
+            >
+              {settingUp ? "Actualizando la base…" : "Actualizar la base"}
+            </button>
+            {setupMsg && (
+              <span className={setupMsg.ok ? "" : "text-up"}> — {setupMsg.text}</span>
+            )}
+          </p>
+        )}
       </footer>
     </main>
   );

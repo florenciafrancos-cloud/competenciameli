@@ -1,8 +1,14 @@
 import type { Query } from "./ingest-core";
 import { runIngest, type IngestResult } from "./ingest-core";
-import { getAccessToken, fetchItems, parseMlId } from "./ml-api";
+import {
+  getAccessToken,
+  fetchItems,
+  fetchCatalogProducts,
+  parseMlId,
+  parseMlLink,
+} from "./ml-api";
 
-export { parseMlId };
+export { parseMlId, parseMlLink };
 
 export type ScanReport = {
   run_id: string;
@@ -45,22 +51,32 @@ export async function runScan(
 
   // ---- 1. Que seguir ----
   const wl = await q(
-    `SELECT kind, value, ml_id FROM watchlist WHERE active = TRUE ORDER BY id`
+    `SELECT kind, value, ml_id, COALESCE(id_kind, 'item') AS id_kind
+     FROM watchlist WHERE active = TRUE ORDER BY id`
   );
 
-  const trackedIds: string[] = [];
+  const itemIds: string[] = [];
+  const productIds: string[] = [];
   const unparsed: string[] = [];
   let legacyCount = 0;
 
   for (const row of wl.rows) {
     if (row.kind === "url") {
-      const id = row.ml_id || parseMlId(row.value);
-      if (id) trackedIds.push(id.toUpperCase());
-      else unparsed.push(row.value);
+      const parsed = row.ml_id
+        ? { id: row.ml_id, kind: row.id_kind as "item" | "product" }
+        : parseMlLink(row.value);
+      if (!parsed) {
+        unparsed.push(row.value);
+        continue;
+      }
+      if (parsed.kind === "product") productIds.push(parsed.id.toUpperCase());
+      else itemIds.push(parsed.id.toUpperCase());
     } else {
       legacyCount++;
     }
   }
+
+  const trackedIds = [...itemIds, ...productIds];
 
   if (legacyCount > 0) {
     report.warnings.push(
@@ -90,8 +106,24 @@ export async function runScan(
   const token = await getAccessToken(q);
 
   // ---- 3. Consultar Mercado Libre ----
-  const { listings, notFound, warnings } = await fetchItems(unique, token);
-  report.warnings.push(...warnings);
+  // Las publicaciones van por /items (multiget, lotes de 20); las fichas de
+  // catalogo por /products, una por una.
+  const listings = [];
+  const notFound: string[] = [];
+
+  if (itemIds.length > 0) {
+    const r = await fetchItems([...new Set(itemIds)], token);
+    listings.push(...r.listings);
+    notFound.push(...r.notFound);
+    report.warnings.push(...r.warnings);
+  }
+  if (productIds.length > 0) {
+    const r = await fetchCatalogProducts([...new Set(productIds)], token);
+    listings.push(...r.listings);
+    notFound.push(...r.notFound);
+    report.warnings.push(...r.warnings);
+  }
+
   report.read_ok = listings.length;
   report.not_found = notFound.length;
 

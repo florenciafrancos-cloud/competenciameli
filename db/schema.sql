@@ -139,3 +139,9 @@ CREATE INDEX IF NOT EXISTS watchlist_ml_id_idx ON watchlist (ml_id);
 -- marca o vendedor no se pueden relevar. Se desactivan para que no queden
 -- generando advertencias en cada corrida. El seguimiento es por link.
 UPDATE watchlist SET active = FALSE WHERE kind IN ('brand', 'seller');
+
+-- Mercado Libre tiene dos clases de link: la publicacion de un vendedor
+-- ('item') y la ficha de catalogo donde compiten varios ('product').
+-- Se guardan distinto porque se consultan con endpoints distintos.
+ALTER TABLE watchlist ADD COLUMN IF NOT EXISTS id_kind TEXT NOT NULL DEFAULT 'item';
+ALTER TABLE listings  ADD COLUMN IF NOT EXISTS id_kind TEXT NOT NULL DEFAULT 'item';

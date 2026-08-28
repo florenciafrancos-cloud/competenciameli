@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { sql } from "@/lib/db";
-import { getAccessToken, parseMlId, previewItem } from "@/lib/ml-api";
+import { getAccessToken, parseMlLink, previewItem } from "@/lib/ml-api";
 import type { Query } from "@/lib/ingest-core";
 
 export const runtime = "nodejs";
@@ -17,6 +17,7 @@ export async function GET() {
   try {
     const res = await sql.query(
       `SELECT w.id, w.kind, w.value, w.label, w.notes, w.ml_id, w.active,
+              COALESCE(w.id_kind, 'item') AS id_kind,
               w.created_at,
               l.title, l.price, l.seller, l.ml_status, l.status,
               l.available_quantity, l.url, l.last_seen_at
@@ -57,12 +58,21 @@ export async function POST(req: Request) {
     );
   }
 
-  const mlId = parseMlId(raw);
-  if (!mlId) {
+  const parsed = parseMlLink(raw);
+  const mlId = parsed?.id ?? null;
+  if (!parsed || !mlId) {
+    // Caso concreto y frecuente: los links /up/MLAU... sin
+    // product_trigger_id no se pueden resolver. Vale explicar exactamente
+    // qué hacer en vez de un "link inválido" genérico.
+    const esUserProduct = /\/up\/ML[A-Z]U/i.test(raw);
     return NextResponse.json(
       {
-        error:
-          "No pude reconocer un ID de publicación en eso. Pegá el link completo de Mercado Libre (o el código que empieza con MLA).",
+        error: esUserProduct
+          ? "Ese link es de una página de producto que Mercado Libre no permite consultar por sí sola. " +
+            "Solución: en esa misma página, hacé click en el vendedor (o en “Otras opciones de compra”) " +
+            "y copiá la URL que empieza con articulo.mercadolibre.com.ar."
+          : "No pude reconocer un ID de Mercado Libre en eso. Pegá el link completo de la publicación " +
+            "(articulo.mercadolibre.com.ar/MLA-...) o de la ficha de catálogo (.../p/MLA...).",
       },
       { status: 400 }
     );
@@ -83,7 +93,7 @@ export async function POST(req: Request) {
 
     // Verificamos contra Mercado Libre antes de guardar.
     const token = await getAccessToken(query);
-    const preview = await previewItem(mlId, token);
+    const preview = await previewItem(mlId, token, parsed.kind);
     if (!preview.ok) {
       return NextResponse.json({ error: preview.error }, { status: 400 });
     }
@@ -91,18 +101,20 @@ export async function POST(req: Request) {
     const l = preview.listing;
 
     await query(
-      `INSERT INTO watchlist (kind, value, label, notes, ml_id, active)
-       VALUES ('url', $1, $2, $3, $4, TRUE)
+      `INSERT INTO watchlist (kind, value, label, notes, ml_id, id_kind, active)
+       VALUES ('url', $1, $2, $3, $4, $5, TRUE)
        ON CONFLICT (kind, value) DO UPDATE
-         SET active = TRUE,
-             label  = EXCLUDED.label,
-             notes  = EXCLUDED.notes,
-             ml_id  = EXCLUDED.ml_id`,
+         SET active  = TRUE,
+             label   = EXCLUDED.label,
+             notes   = EXCLUDED.notes,
+             ml_id   = EXCLUDED.ml_id,
+             id_kind = EXCLUDED.id_kind`,
       [
         l.url ?? raw,
         String(body?.label ?? l.title).slice(0, 300),
         body?.notes ?? null,
         mlId,
+        parsed.kind,
       ]
     );
 
@@ -122,6 +134,7 @@ export async function POST(req: Request) {
     return NextResponse.json({
       ok: true,
       ml_id: mlId,
+      kind: parsed.kind,
       listing: {
         title: l.title,
         price: l.price,

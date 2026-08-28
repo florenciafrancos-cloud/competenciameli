@@ -132,6 +132,20 @@ los cambios se ven únicamente en el tablero:
 | `ALERT_EMAIL_TO` | Tu mail. Varios separados por coma |
 | `ALERT_EMAIL_FROM` | `onboarding@resend.dev` sirve para arrancar |
 
+> **Importante con Resend:** mientras uses `onboarding@resend.dev` como
+> remitente (o sea, mientras no verifiques un dominio propio), Resend
+> **solo permite enviar a la dirección con la que creaste la cuenta**.
+> Si ponés otra en `ALERT_EMAIL_TO`, la API devuelve un 403 con el mensaje
+> *"You can only send testing emails to your own email address"*.
+> Para mandar a varios destinatarios hay que verificar un dominio en
+> [resend.com/domains](https://resend.com/domains) y usar una dirección de
+> ese dominio como `ALERT_EMAIL_FROM`.
+
+En el pie del tablero hay un botón **"Probar el mail de alerta"**: manda un
+correo de ejemplo y, si falla, muestra el error de Resend tal cual. Sirve para
+confirmar la configuración en el momento, en vez de esperar a que la
+competencia cambie un precio para descubrir que no llegaba nada.
+
 Y para comparar contra tus propios precios:
 
 | Variable | Qué es |

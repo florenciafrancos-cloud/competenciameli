@@ -201,6 +201,12 @@ export default function Home() {
   const [covRunning, setCovRunning] = useState(false);
   const [covResult, setCovResult] = useState<any>(null);
 
+  // Prueba de las notificaciones por mail
+  const [testing, setTesting] = useState(false);
+  const [testMsg, setTestMsg] = useState<{ ok: boolean; text: string } | null>(
+    null
+  );
+
   const [scanning, setScanning] = useState(false);
   const [scanMsg, setScanMsg] = useState<{ ok: boolean; text: string } | null>(
     null
@@ -387,6 +393,27 @@ export default function Home() {
       body: JSON.stringify({ ml_id: mlId, sku }),
     });
     load();
+  }
+
+  async function testEmail() {
+    setTesting(true);
+    setTestMsg(null);
+    try {
+      const res = await fetch("/api/test-email", { method: "POST" });
+      const d = await res.json();
+      setTestMsg(
+        d.ok
+          ? { ok: true, text: `Correo enviado a ${d.to}. ${d.mensaje}` }
+          : {
+              ok: false,
+              text: [d.error, d.ayuda].filter(Boolean).join("\n\n"),
+            }
+      );
+    } catch (e) {
+      setTestMsg({ ok: false, text: e instanceof Error ? e.message : String(e) });
+    } finally {
+      setTesting(false);
+    }
   }
 
   async function runCoverage() {
@@ -1273,6 +1300,23 @@ export default function Home() {
             {setupMsg && (
               <span className={setupMsg.ok ? "" : "text-up"}> — {setupMsg.text}</span>
             )}
+            {"  ·  "}
+            <button
+              onClick={testEmail}
+              disabled={testing}
+              className="underline decoration-dotted disabled:opacity-40"
+            >
+              {testing ? "Enviando…" : "Probar el mail de alerta"}
+            </button>
+          </p>
+        )}
+        {testMsg && (
+          <p
+            className={`mt-2 whitespace-pre-wrap ${
+              testMsg.ok ? "" : "text-up"
+            }`}
+          >
+            {testMsg.text}
           </p>
         )}
       </footer>

@@ -175,6 +175,9 @@ export default function Home() {
   const [addMsg, setAddMsg] = useState<{ ok: boolean; text: string } | null>(
     null
   );
+  const [candidates, setCandidates] = useState<
+    { id: string; name: string }[]
+  >([]);
 
   const [settingUp, setSettingUp] = useState(false);
   const [setupMsg, setSetupMsg] = useState<{ ok: boolean; text: string } | null>(
@@ -298,18 +301,8 @@ export default function Home() {
       });
       const d = await res.json();
       if (!res.ok) {
-        const cands = Array.isArray(d.candidates) ? d.candidates : [];
-        setAddMsg({
-          ok: false,
-          text:
-            (d.error ?? "No se pudo agregar.") +
-            (cands.length
-              ? "\n\nOpciones encontradas:\n" +
-                cands
-                  .map((c: any) => `· ${c.id} — ${c.name}`)
-                  .join("\n")
-              : ""),
-        });
+        setCandidates(Array.isArray(d.candidates) ? d.candidates : []);
+        setAddMsg({ ok: false, text: d.error ?? "No se pudo agregar." });
       } else {
         setAddMsg({
           ok: true,
@@ -320,6 +313,38 @@ export default function Home() {
           }`,
         });
         setNewLink("");
+        setCandidates([]);
+        load();
+      }
+    } catch (e) {
+      setAddMsg({ ok: false, text: e instanceof Error ? e.message : String(e) });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  /** La persona eligió una de las opciones: un click y listo. */
+  async function chooseCandidate(productId: string) {
+    setSaving(true);
+    setAddMsg(null);
+    try {
+      const res = await fetch("/api/watchlist", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ product_id: productId, value: newLink.trim() }),
+      });
+      const d = await res.json();
+      if (!res.ok) {
+        setAddMsg({ ok: false, text: d.error ?? "No se pudo agregar." });
+      } else {
+        setAddMsg({
+          ok: true,
+          text: `Agregado: ${d.listing.title} — ${money(d.listing.price)}${
+            d.listing.offers_count ? ` · ${d.listing.offers_count} ofertas` : ""
+          }`,
+        });
+        setNewLink("");
+        setCandidates([]);
         load();
       }
     } catch (e) {
@@ -478,6 +503,11 @@ export default function Home() {
               {addMsg.text}
             </p>
           )}
+          <CandidateList
+            candidates={candidates}
+            onChoose={chooseCandidate}
+            disabled={saving}
+          />
         </div>
       )}
 
@@ -809,10 +839,15 @@ export default function Home() {
             </button>
           </div>
           {addMsg && (
-            <p className={`text-[13px] mb-4 whitespace-pre-wrap ${addMsg.ok ? "muted" : "text-up"}`}>
+            <p className={`text-[13px] mb-2 whitespace-pre-wrap ${addMsg.ok ? "muted" : "text-up"}`}>
               {addMsg.text}
             </p>
           )}
+          <CandidateList
+            candidates={candidates}
+            onChoose={chooseCandidate}
+            disabled={saving}
+          />
 
           <div className="scroll-x mt-4">
             <table className="data">
@@ -914,6 +949,39 @@ export default function Home() {
         )}
       </footer>
     </main>
+  );
+}
+
+function CandidateList({
+  candidates,
+  onChoose,
+  disabled,
+}: {
+  candidates: { id: string; name: string }[];
+  onChoose: (id: string) => void;
+  disabled: boolean;
+}) {
+  if (candidates.length === 0) return null;
+  return (
+    <div className="mt-3">
+      <div className="muted text-[12px] mb-2">
+        Tocá el producto correcto:
+      </div>
+      <ul className="space-y-1.5">
+        {candidates.map((c) => (
+          <li key={c.id}>
+            <button
+              onClick={() => onChoose(c.id)}
+              disabled={disabled}
+              className="w-full text-left rounded-md border hairline px-3 py-2 text-[13px] hover:bg-black/[.03] disabled:opacity-40"
+            >
+              {c.name}
+              <span className="muted text-[11px] block tabular">{c.id}</span>
+            </button>
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }
 

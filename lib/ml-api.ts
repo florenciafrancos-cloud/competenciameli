@@ -1028,10 +1028,8 @@ export async function resolveUserProduct(
     candidates,
     error:
       candidates.length > 0
-        ? `Ese link no trae el ID del producto de catálogo, así que lo busqué por el ` +
-          `nombre y encontré varias opciones parecidas. Elegí la correcta de la lista ` +
-          `y pegá su código, o abrí el producto desde el buscador de Mercado Libre ` +
-          `para obtener un link con /p/.`
+        ? `Ese link no dice qué variante es, así que busqué por el nombre y hay ` +
+          `varias parecidas.`
         : `No encontré el producto en el catálogo de Mercado Libre a partir de este link.`,
   };
 }

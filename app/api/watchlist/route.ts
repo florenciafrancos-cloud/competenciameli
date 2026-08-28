@@ -59,9 +59,30 @@ export async function POST(req: Request) {
   }
 
   const raw = String(body?.value ?? "").trim();
+
+  /**
+   * `product_id` viene cuando la persona eligio una opcion de la lista de
+   * candidatos con un click. En ese caso no hay nada que interpretar: ya
+   * sabemos exactamente que ficha de catalogo seguir.
+   *
+   * Existe porque la primera version mostraba los candidatos como texto y
+   * pedia copiar un codigo a mano. Eso es trasladarle el problema al
+   * usuario: elegir tiene que ser un click.
+   */
+  const chosenProductId = String(body?.product_id ?? "").trim().toUpperCase();
+  if (chosenProductId) {
+    if (!/^ML[A-Z]\d{4,}$/.test(chosenProductId)) {
+      return NextResponse.json(
+        { error: `Código de producto inválido: ${chosenProductId}` },
+        { status: 400 }
+      );
+    }
+    return addProduct(chosenProductId, "product", raw || null);
+  }
+
   if (!raw) {
     return NextResponse.json(
-      { error: "Pegá el link de la publicación de Mercado Libre." },
+      { error: "Pegá el link del producto en Mercado Libre." },
       { status: 400 }
     );
   }
@@ -91,42 +112,55 @@ export async function POST(req: Request) {
 
     // Los links /up/MLAU... no traen el ID de catálogo: hay que resolverlo.
     let effectiveId = mlId;
-    let effectiveKind = parsed.kind;
+    let effectiveKind: "item" | "product" = "item";
 
     if (parsed.kind === "user_product") {
       const resolved = await resolveUserProduct(mlId, raw, token);
       if (!resolved.ok) {
         return NextResponse.json(
-          {
-            error: resolved.error,
-            candidates: resolved.candidates,
-          },
+          { error: resolved.error, candidates: resolved.candidates },
           { status: 400 }
         );
       }
       effectiveId = resolved.productId;
       effectiveKind = "product";
+    } else {
+      effectiveKind = parsed.kind === "product" ? "product" : "item";
     }
 
-    // ¿Ya la estábamos siguiendo?
+    return addProduct(effectiveId, effectiveKind, raw);
+  } catch (err) {
+    return NextResponse.json(
+      { error: err instanceof Error ? err.message : String(err) },
+      { status: 500 }
+    );
+  }
+}
+
+/**
+ * Verifica contra Mercado Libre, guarda en la lista, y deja la foto inicial
+ * de precio para tener contra que comparar mañana.
+ */
+async function addProduct(
+  id: string,
+  kind: "item" | "product",
+  sourceUrl: string | null
+) {
+  try {
+    const token = await getAccessToken(query);
+
     const dup = await query(
       `SELECT id, active FROM watchlist WHERE ml_id = $1 LIMIT 1`,
-      [effectiveId]
+      [id]
     );
     if (dup.rows.length > 0 && dup.rows[0].active) {
       return NextResponse.json(
-        { error: `Ese producto (${effectiveId}) ya está en la lista.` },
+        { error: `Ese producto (${id}) ya está en la lista.` },
         { status: 409 }
       );
     }
 
-    // Verificamos contra Mercado Libre antes de guardar.
-    const preview = await previewItem(
-      effectiveId,
-      token,
-      effectiveKind === "user_product" ? "product" : effectiveKind,
-      raw
-    );
+    const preview = await previewItem(id, token, kind, sourceUrl);
     if (!preview.ok) {
       return NextResponse.json({ error: preview.error }, { status: 400 });
     }
@@ -143,24 +177,20 @@ export async function POST(req: Request) {
              ml_id   = EXCLUDED.ml_id,
              id_kind = EXCLUDED.id_kind`,
       [
-        l.url ?? raw,
-        String(body?.label ?? l.title).slice(0, 300),
-        body?.notes ?? null,
-        effectiveId,
-        // previewItem puede resolver como ficha de catalogo algo que el
-        // link parecia publicacion: se guarda lo que realmente funciono.
+        sourceUrl || l.url || id,
+        String(l.title).slice(0, 300),
+        null,
+        id,
         preview.kind,
       ]
     );
 
-    // Guardamos la foto inicial para tener contra qué comparar mañana.
-    // Sin esto, el primer cambio de precio pasaría desapercibido.
     const { runIngest } = await import("@/lib/ingest-core");
     await runIngest(
       {
-        run_id: `alta ${effectiveId} ${new Date().toISOString().slice(0, 16).replace("T", " ")}`,
+        run_id: `alta ${id} ${new Date().toISOString().slice(0, 16).replace("T", " ")}`,
         source: "alta-manual",
-        tracked_ids: [effectiveId],
+        tracked_ids: [id],
         listings: [l],
       },
       query
@@ -168,7 +198,7 @@ export async function POST(req: Request) {
 
     return NextResponse.json({
       ok: true,
-      ml_id: effectiveId,
+      ml_id: id,
       kind: preview.kind,
       listing: {
         title: l.title,

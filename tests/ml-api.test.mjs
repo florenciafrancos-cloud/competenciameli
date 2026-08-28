@@ -710,7 +710,7 @@ await test("CRITICO: si hay dos candidatos parecidos, NO elige solo", async () =
   );
   assert.equal(r.ok, false);
   assert.equal(r.candidates.length, 2);
-  assert.match(r.error, /Elegí la correcta/);
+  assert.match(r.error, /varias parecidas/);
 });
 
 await test("devuelve las opciones ordenadas por parecido", async () => {

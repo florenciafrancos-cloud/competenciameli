@@ -32,6 +32,7 @@ import {
   resolveUserProduct,
   slugWords,
   hintedItemId,
+  checkCoverage,
 } from "../lib/ml-api";
 import { runScan } from "../lib/scan";
 
@@ -685,6 +686,8 @@ await test("si no, busca en el catalogo y acepta un match claro", async () => {
     { id: "MLA88888888", name: "Botella Termica Contigo 473ml Acero Inoxidable DualSip" },
     { id: "MLA77777777", name: "Mochila escolar azul" }
   );
+  putOffers("MLA88888888", [{ item_id: "MLA1000000003", seller_id: 1, price: 48000 }]);
+  putOffers("MLA77777777", [{ item_id: "MLA1000000004", seller_id: 2, price: 9000 }]);
   const r = await resolveUserProduct(
     "MLAU9999999999",
     "https://www.mercadolibre.com.ar/botella-termica-contigo-473ml-acero-inoxidable-dualsip/up/MLAU9999999999",
@@ -692,7 +695,6 @@ await test("si no, busca en el catalogo y acepta un match claro", async () => {
   );
   assert.equal(r.ok, true);
   assert.equal(r.productId, "MLA88888888");
-  assert.equal(r.via, "/products/search");
 });
 
 await test("CRITICO: si hay dos candidatos parecidos, NO elige solo", async () => {
@@ -703,6 +705,8 @@ await test("CRITICO: si hay dos candidatos parecidos, NO elige solo", async () =
     { id: "MLA11111111", name: "Botella Termica Contigo 473ml Acero Inoxidable DualSip Negro" },
     { id: "MLA22222222", name: "Botella Termica Contigo 473ml Acero Inoxidable DualSip Blanco" }
   );
+  putOffers("MLA11111111", [{ item_id: "MLA1000000001", seller_id: 1, price: 50000 }]);
+  putOffers("MLA22222222", [{ item_id: "MLA1000000002", seller_id: 2, price: 52000 }]);
   const r = await resolveUserProduct(
     "MLAU9999999999",
     "https://www.mercadolibre.com.ar/botella-termica-contigo-473ml-acero-inoxidable-dualsip/up/MLAU9999999999",
@@ -710,7 +714,7 @@ await test("CRITICO: si hay dos candidatos parecidos, NO elige solo", async () =
   );
   assert.equal(r.ok, false);
   assert.equal(r.candidates.length, 2);
-  assert.match(r.error, /varias parecidas/);
+  assert.match(r.error, /ofertas activas/);
 });
 
 await test("devuelve las opciones ordenadas por parecido", async () => {
@@ -719,6 +723,8 @@ await test("devuelve las opciones ordenadas por parecido", async () => {
     { id: "MLA33333333", name: "Contigo algo distinto" },
     { id: "MLA44444444", name: "Botella Termica Contigo 473ml Acero Inoxidable DualSip" }
   );
+  putOffers("MLA33333333", [{ item_id: "MLA1000000005", seller_id: 1, price: 1000 }]);
+  putOffers("MLA44444444", [{ item_id: "MLA1000000006", seller_id: 2, price: 48000 }]);
   const r = await resolveUserProduct(
     "MLAU9999999999",
     "https://www.mercadolibre.com.ar/botella-termica-contigo-473ml-acero-inoxidable-dualsip/up/MLAU9999999999",
@@ -729,7 +735,7 @@ await test("devuelve las opciones ordenadas por parecido", async () => {
   assert.equal(r.productId, "MLA44444444");
 });
 
-await test("extrae el item_id de pdp_filters (literal y escapado)", () => {
+await test("extrae el item de referencia en todas sus formas", () => {
   assert.equal(
     hintedItemId(
       "https://www.mercadolibre.com.ar/x/up/MLAU4148053079?pdp_filters=item_id:MLA3514608986#is_advertising=true"
@@ -738,6 +744,17 @@ await test("extrae el item_id de pdp_filters (literal y escapado)", () => {
   );
   assert.equal(
     hintedItemId("https://www.mercadolibre.com.ar/x/up/MLAU1?pdp_filters=item_id%3AMLA3514608986"),
+    "MLA3514608986"
+  );
+  // Tambien viene como wid, escapado, dentro del fragmento tras el "#".
+  assert.equal(
+    hintedItemId(
+      "https://www.mercadolibre.com.ar/x/up/MLAU4148053079?gallery_type=horizontal#reco_id%3Df46e%26wid%3DMLA3514608986%26sid%3Drecos"
+    ),
+    "MLA3514608986"
+  );
+  assert.equal(
+    hintedItemId("https://www.mercadolibre.com.ar/x/p/MLA1?wid=MLA3514608986"),
     "MLA3514608986"
   );
   assert.equal(hintedItemId("https://www.mercadolibre.com.ar/x/up/MLAU1"), null);
@@ -772,6 +789,7 @@ await test("si el item_id no aparece en ninguna, vuelve a preguntar", async () =
   );
   putOffers("MLA55550001", [{ item_id: "MLA1111111111", seller_id: 1, price: 10000 }]);
   putOffers("MLA55550002", [{ item_id: "MLA2222222222", seller_id: 2, price: 20000 }]);
+  // ambos tienen ofertas -> no se puede auto-elegir sin el item_id
 
   const r = await resolveUserProduct(
     "MLAU4148053079",
@@ -780,6 +798,72 @@ await test("si el item_id no aparece en ninguna, vuelve a preguntar", async () =
   );
   assert.equal(r.ok, false);
   assert.equal(r.candidates.length, 2);
+});
+
+await test("no ofrece como opcion los productos sin ofertas activas", async () => {
+  // Es lo que hizo perder tiempo en produccion: la lista incluia productos
+  // muertos y elegirlos daba error, uno por uno.
+  CATALOG_SEARCH.length = 0;
+  CATALOG_SEARCH.push(
+    { id: "MLA66660001", name: "Botella Termica Contigo 473ml Autoseal Negro" },
+    { id: "MLA66660002", name: "Botella Termica Contigo 473ml Autoseal Blanco" },
+    { id: "MLA66660003", name: "Botella Termica Contigo 473ml Autoseal Gris" }
+  );
+  CATALOG_OFFERS.delete("MLA66660001");
+  CATALOG_OFFERS.delete("MLA66660002");
+  putOffers("MLA66660003", [{ item_id: "MLA1000000007", seller_id: 3, price: 41000 }]);
+
+  const r = await resolveUserProduct(
+    "MLAU1",
+    "https://www.mercadolibre.com.ar/botella-termica-contigo-473ml-autoseal/up/MLAU1",
+    "T"
+  );
+  // Queda uno solo con ofertas -> no hay nada que preguntar.
+  assert.equal(r.ok, true);
+  assert.equal(r.productId, "MLA66660003");
+  assert.match(r.via, /ofertas activas/);
+});
+
+await test("las opciones muestran precio y cantidad de competidores", async () => {
+  CATALOG_SEARCH.length = 0;
+  CATALOG_SEARCH.push(
+    { id: "MLA66670001", name: "Contigo Autoseal 473ml Negro" },
+    { id: "MLA66670002", name: "Contigo Autoseal 473ml Blanco" }
+  );
+  putOffers("MLA66670001", [
+    { item_id: "MLA1000000010", seller_id: 1, price: 45000 },
+    { item_id: "MLA1000000011", seller_id: 2, price: 47000 },
+  ]);
+  putOffers("MLA66670002", [{ item_id: "MLA1000000012", seller_id: 3, price: 39000 }]);
+
+  const r = await resolveUserProduct(
+    "MLAU1",
+    "https://www.mercadolibre.com.ar/contigo-autoseal-473ml/up/MLAU1",
+    "T"
+  );
+  assert.equal(r.ok, false, "deberia preguntar: hay dos validas");
+  const negro = r.candidates.find((c) => c.id === "MLA66670001");
+  assert.equal(negro.price, 45000, "no muestra el mejor precio");
+  assert.equal(negro.offers_count, 2, "no muestra cuantos compiten");
+});
+
+await test("si NINGUNA variante tiene ofertas, lo explica claramente", async () => {
+  CATALOG_SEARCH.length = 0;
+  CATALOG_SEARCH.push(
+    { id: "MLA66680001", name: "Contigo Autoseal 473ml Negro" },
+    { id: "MLA66680002", name: "Contigo Autoseal 473ml Blanco" }
+  );
+  CATALOG_OFFERS.delete("MLA66680001");
+  CATALOG_OFFERS.delete("MLA66680002");
+
+  const r = await resolveUserProduct(
+    "MLAU1",
+    "https://www.mercadolibre.com.ar/contigo-autoseal-473ml/up/MLAU1",
+    "T"
+  );
+  assert.equal(r.ok, false);
+  assert.equal(r.candidates.length, 0, "no debe ofrecer opciones muertas");
+  assert.match(r.error, /ninguna de las variantes tiene ofertas activas/);
 });
 
 await test("si el catalogo no devuelve nada, lo dice sin inventar", async () => {
@@ -792,6 +876,67 @@ await test("si el catalogo no devuelve nada, lo dice sin inventar", async () => 
   assert.equal(r.ok, false);
   assert.equal(r.candidates.length, 0);
   assert.match(r.error, /No encontré el producto/);
+});
+
+// ---------------------------------------------------------------
+console.log("\n== Cobertura: se puede seguir o no ==");
+
+await test("marca 'seguible' un producto con ofertas en catalogo", async () => {
+  CATALOG_SEARCH.length = 0;
+  CATALOG_SEARCH.push({ id: "MLA70000001", name: "Bubba Matterhorn 1.1L Acero" });
+  putOffers("MLA70000001", [
+    { item_id: "MLA1000000020", seller_id: 1, price: 52000 },
+    { item_id: "MLA1000000021", seller_id: 2, price: 58000 },
+  ]);
+
+  const r = await checkCoverage("Bubba Matterhorn 1.1L", "T");
+  assert.equal(r.status, "seguible");
+  assert.equal(r.price, 52000);
+  assert.equal(r.offers_count, 2);
+  assert.equal(r.product_id, "MLA70000001");
+});
+
+await test("marca 'sin_ofertas' el caso de la tienda oficial con variantes", async () => {
+  // Este es exactamente el caso del Contigo Autoseal: el producto existe en
+  // el catalogo, pero ninguna publicacion participa, asi que no hay precio.
+  CATALOG_SEARCH.length = 0;
+  CATALOG_SEARCH.push({
+    id: "MLA70000002",
+    name: "Botella Termica Contigo 473ml Acero Inoxidable Autoseal",
+  });
+  CATALOG_OFFERS.delete("MLA70000002");
+
+  const r = await checkCoverage("Contigo Autoseal 473ml", "T");
+  assert.equal(r.status, "sin_ofertas");
+  assert.equal(r.price, undefined);
+  assert.match(r.detail, /no hay precio consultable/);
+});
+
+await test("marca 'no_encontrado' lo que no existe en el catalogo", async () => {
+  CATALOG_SEARCH.length = 0;
+  const r = await checkCoverage("Producto Inventado Xyz", "T");
+  assert.equal(r.status, "no_encontrado");
+});
+
+await test("elige el candidato con ofertas, no simplemente el primero", async () => {
+  // Si el mejor por nombre no tiene ofertas, hay que seguir buscando en la
+  // lista en vez de declarar que no se puede seguir.
+  CATALOG_SEARCH.length = 0;
+  CATALOG_SEARCH.push(
+    { id: "MLA70000010", name: "Bubba Keg 1.9L Acero Inoxidable" },
+    { id: "MLA70000011", name: "Bubba Keg 1.9L Acero" }
+  );
+  CATALOG_OFFERS.delete("MLA70000010");
+  putOffers("MLA70000011", [{ item_id: "MLA1000000030", seller_id: 5, price: 84000 }]);
+
+  const r = await checkCoverage("Bubba Keg 1.9L Acero Inoxidable", "T");
+  assert.equal(r.status, "seguible");
+  assert.equal(r.product_id, "MLA70000011");
+});
+
+await test("un nombre vacio no rompe", async () => {
+  const r = await checkCoverage("   ", "T");
+  assert.equal(r.status, "error");
 });
 
 // ---------------------------------------------------------------

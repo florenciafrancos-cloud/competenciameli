@@ -153,7 +153,7 @@ function Sparkline({ mlId }: { mlId: string }) {
 // Página
 // ---------------------------------------------------------------
 
-type Tab = "cambios" | "publicaciones" | "watchlist";
+type Tab = "cambios" | "publicaciones" | "watchlist" | "cobertura";
 
 export default function Home() {
   const [tab, setTab] = useState<Tab>("cambios");
@@ -176,13 +176,23 @@ export default function Home() {
     null
   );
   const [candidates, setCandidates] = useState<
-    { id: string; name: string }[]
+    {
+      id: string;
+      name: string;
+      price?: number | null;
+      offers_count?: number | null;
+    }[]
   >([]);
 
   const [settingUp, setSettingUp] = useState(false);
   const [setupMsg, setSetupMsg] = useState<{ ok: boolean; text: string } | null>(
     null
   );
+
+  // Prueba de cobertura: cuanto del catalogo propio se puede seguir
+  const [covText, setCovText] = useState("");
+  const [covRunning, setCovRunning] = useState(false);
+  const [covResult, setCovResult] = useState<any>(null);
 
   const [scanning, setScanning] = useState(false);
   const [scanMsg, setScanMsg] = useState<{ ok: boolean; text: string } | null>(
@@ -354,6 +364,24 @@ export default function Home() {
     }
   }
 
+  async function runCoverage() {
+    setCovRunning(true);
+    setCovResult(null);
+    try {
+      const res = await fetch("/api/ml/coverage", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: covText }),
+      });
+      const d = await res.json();
+      setCovResult(d);
+    } catch (e) {
+      setCovResult({ error: e instanceof Error ? e.message : String(e) });
+    } finally {
+      setCovRunning(false);
+    }
+  }
+
   async function removeWatch(id: number) {
     await fetch(`/api/watchlist?id=${id}`, { method: "DELETE" });
     load();
@@ -508,6 +536,16 @@ export default function Home() {
             onChoose={chooseCandidate}
             disabled={saving}
           />
+          <p className="muted text-[12px] mt-4">
+            ¿No sabés si tus productos se pueden seguir?{" "}
+            <button
+              onClick={() => setTab("cobertura")}
+              className="underline decoration-dotted"
+            >
+              Probá tu catálogo primero
+            </button>
+            .
+          </p>
         </div>
       )}
 
@@ -526,7 +564,7 @@ export default function Home() {
         </section>
       )}
 
-      {activos.length > 0 && (
+      {(activos.length > 0 || tab === "cobertura") && (
         <>
           <nav className="flex gap-1 border-b hairline mb-4">
             {(
@@ -534,6 +572,7 @@ export default function Home() {
                 ["cambios", `Cambios${changes.length ? ` (${changes.length})` : ""}`],
                 ["publicaciones", `Precios de hoy${listings.length ? ` (${listings.length})` : ""}`],
                 ["watchlist", `Qué se monitorea (${activos.length})`],
+                ["cobertura", "Probar mi catálogo"],
               ] as [Tab, string][]
             ).map(([key, label]) => (
               <button
@@ -927,6 +966,131 @@ export default function Home() {
         </section>
       )}
 
+      {tab === "cobertura" && (
+        <section className="card p-4">
+          <h2 className="text-sm font-semibold">Probar mi catálogo</h2>
+          <p className="muted text-[13px] mt-1 mb-1 max-w-2xl">
+            Pegá los nombres de tus productos, uno por línea, y te digo cuáles
+            se pueden seguir con esta herramienta y cuáles no.
+          </p>
+          <p className="muted text-[12px] mb-3 max-w-2xl">
+            La API de Mercado Libre solo permite consultar productos que
+            participan de su catálogo. Las publicaciones de tienda oficial con
+            variantes internas no se pueden seguir — ni con esta app ni con
+            ninguna que use la API. Esto te dice, con datos, de qué lado cae tu
+            catálogo antes de que inviertas tiempo.
+          </p>
+
+          <textarea
+            value={covText}
+            onChange={(e) => setCovText(e.target.value)}
+            rows={7}
+            placeholder={"Bubba Matterhorn 1.1L\nContigo Autoseal 473ml\nBubba Keg 1.9L"}
+            className="w-full rounded-md border hairline bg-transparent px-3 py-2 text-[13px] font-mono"
+          />
+          <div className="flex items-center gap-3 mt-2">
+            <button
+              onClick={runCoverage}
+              disabled={covRunning || !covText.trim()}
+              className="rounded-md bg-ink text-white px-4 py-2 text-[13px] disabled:opacity-40"
+            >
+              {covRunning ? "Probando…" : "Probar"}
+            </button>
+            <span className="muted text-[12px]">
+              Hasta 40 por vez. Tarda unos segundos por producto.
+            </span>
+          </div>
+
+          {covResult?.error && (
+            <p className="text-up text-[13px] mt-3">{covResult.error}</p>
+          )}
+
+          {covResult?.resumen && (
+            <div className="mt-5">
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+                <Kpi label="Se pueden seguir" value={covResult.resumen.seguibles} />
+                <Kpi label="Sin ofertas en catálogo" value={covResult.resumen.sin_ofertas} />
+                <Kpi label="No encontrados" value={covResult.resumen.no_encontrados} />
+                <Kpi label="Probados" value={covResult.resumen.total} />
+              </div>
+
+              <p className="text-[13px] mb-3">
+                {covResult.resumen.seguibles === 0 ? (
+                  <>
+                    Ninguno de estos productos se puede seguir por la API. Para
+                    tu caso, esta herramienta no alcanza — conviene una
+                    herramienta con acceso certificado por Mercado Libre.
+                  </>
+                ) : (
+                  <>
+                    <strong>
+                      {covResult.resumen.seguibles} de {covResult.resumen.total}
+                    </strong>{" "}
+                    se pueden seguir con precio real y alertas de cambio.
+                  </>
+                )}
+              </p>
+
+              <div className="scroll-x">
+                <table className="data">
+                  <thead>
+                    <tr>
+                      <th>Tu producto</th>
+                      <th>Estado</th>
+                      <th>Encontrado en ML como</th>
+                      <th style={{ textAlign: "right" }}>Mejor precio</th>
+                      <th style={{ textAlign: "right" }}>Vendedores</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {covResult.rows.map((r: any, i: number) => (
+                      <tr key={i}>
+                        <td className="font-medium">{r.query}</td>
+                        <td
+                          className={
+                            r.status === "seguible" ? "text-down" : "text-up"
+                          }
+                        >
+                          {r.status === "seguible"
+                            ? "se puede seguir"
+                            : r.status === "sin_ofertas"
+                            ? "sin ofertas en catálogo"
+                            : r.status === "no_encontrado"
+                            ? "no encontrado"
+                            : "error"}
+                          {r.detail && (
+                            <div className="muted text-[11px]">{r.detail}</div>
+                          )}
+                        </td>
+                        <td className="muted max-w-[320px]">
+                          {r.product_name ?? "—"}
+                          {r.product_id && (
+                            <div className="text-[11px] tabular">{r.product_id}</div>
+                          )}
+                        </td>
+                        <td className="tabular text-right whitespace-nowrap">
+                          {r.price != null ? money(r.price) : "—"}
+                        </td>
+                        <td className="tabular text-right">
+                          {r.offers_count ?? "—"}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              {covResult.omitidos > 0 && (
+                <p className="muted text-[12px] mt-3">
+                  Se probaron los primeros 40. Quedaron {covResult.omitidos} sin
+                  probar: pegalos en otra tanda.
+                </p>
+              )}
+            </div>
+          )}
+        </section>
+      )}
+
       <footer className="muted text-[12px] mt-8 max-w-2xl">
         <p>
           El control corre solo una vez por día a las 9:00, consultando la API
@@ -957,7 +1121,12 @@ function CandidateList({
   onChoose,
   disabled,
 }: {
-  candidates: { id: string; name: string }[];
+  candidates: {
+    id: string;
+    name: string;
+    price?: number | null;
+    offers_count?: number | null;
+  }[];
   onChoose: (id: string) => void;
   disabled: boolean;
 }) {
@@ -975,8 +1144,20 @@ function CandidateList({
               disabled={disabled}
               className="w-full text-left rounded-md border hairline px-3 py-2 text-[13px] hover:bg-black/[.03] disabled:opacity-40"
             >
-              {c.name}
-              <span className="muted text-[11px] block tabular">{c.id}</span>
+              <div className="flex items-baseline justify-between gap-3">
+                <span>{c.name}</span>
+                {c.price != null && (
+                  <strong className="tabular whitespace-nowrap">
+                    {money(c.price)}
+                  </strong>
+                )}
+              </div>
+              <span className="muted text-[11px] block tabular">
+                {c.offers_count != null
+                  ? `${c.offers_count} ${c.offers_count === 1 ? "vendedor" : "vendedores"} · `
+                  : ""}
+                {c.id}
+              </span>
             </button>
           </li>
         ))}

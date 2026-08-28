@@ -896,6 +896,10 @@ export type CatalogCandidate = {
   id: string;
   name: string;
   score: number;
+  /** Mejor precio actual. null si no se pudo leer. */
+  price?: number | null;
+  /** Cuantos vendedores compiten. 0 = producto sin ofertas activas. */
+  offers_count?: number | null;
 };
 
 export type ResolveResult =
@@ -912,9 +916,21 @@ export type ResolveResult =
  * evita elegir el color equivocado entre variantes con nombre casi igual.
  */
 export function hintedItemId(url: string): string | null {
-  // Puede venir literal (item_id:MLA...) o escapado (item_id%3AMLA...).
-  const m = url.match(/item_id(?::|%3A)(ML[A-Z]\d{6,})/i);
-  return m ? m[1].toUpperCase() : null;
+  // Mercado Libre lo pone de varias formas, incluso dentro del fragmento
+  // despues del "#", y a veces escapado:
+  //   ?pdp_filters=item_id:MLA3514608986
+  //   ?pdp_filters=item_id%3AMLA3514608986
+  //   #...%26wid%3DMLA3514608986%26...
+  //   ?wid=MLA3514608986
+  const patterns = [
+    /item_id(?::|%3A)(ML[A-Z]\d{6,})/i,
+    /wid(?:=|%3D)(ML[A-Z]\d{6,})/i,
+  ];
+  for (const re of patterns) {
+    const m = url.match(re);
+    if (m) return m[1].toUpperCase();
+  }
+  return null;
 }
 
 /** Palabras utiles del slug de una URL de Mercado Libre. */
@@ -987,7 +1003,7 @@ export async function resolveUserProduct(
     };
   }
 
-  const candidates: CatalogCandidate[] = search.data.results
+  const rough: CatalogCandidate[] = search.data.results
     .filter((r: any) => r?.id && r?.name)
     .map((r: any) => ({
       id: String(r.id),
@@ -997,28 +1013,70 @@ export async function resolveUserProduct(
     .sort((a: CatalogCandidate, b: CatalogCandidate) => b.score - a.score)
     .slice(0, 6);
 
-  // Si la URL trae el item_id de la oferta que la persona estaba mirando,
-  // se usa para elegir con certeza: el producto correcto es el unico cuya
-  // lista de ofertas lo incluye.
   const hint = hintedItemId(url);
-  if (hint) {
-    for (const c of candidates) {
-      const offers = await mlFetch(`/products/${c.id}/items`, token);
-      if (!offers.ok || !Array.isArray(offers.data?.results)) continue;
-      const match = offers.data.results.some(
-        (r: any) => String(r?.item_id ?? r?.id ?? "").toUpperCase() === hint
-      );
-      if (match) {
-        return { ok: true, productId: c.id, via: "item_id de la URL" };
-      }
+
+  // Se consultan las ofertas de cada candidato UNA sola vez, y ese dato
+  // sirve para tres cosas:
+  //   - descartar los productos sin ofertas activas (elegir uno de esos
+  //     mandaba a la persona a un error, a ciegas)
+  //   - mostrar precio y cantidad de competidores en cada opcion, para que
+  //     pueda elegir con informacion
+  //   - si la URL trae el item_id, identificar la variante exacta
+  const enriched: CatalogCandidate[] = [];
+  for (const c of rough) {
+    const offersRes = await mlFetch(`/products/${c.id}/items`, token);
+    const list =
+      offersRes.ok && Array.isArray(offersRes.data?.results)
+        ? offersRes.data.results
+            .map(toOffer)
+            .filter((o: CatalogOffer | null): o is CatalogOffer => o !== null)
+            .sort((a: CatalogOffer, b: CatalogOffer) => a.price - b.price)
+        : [];
+
+    // Coincidencia exacta por item_id: elegimos con certeza.
+    if (hint && list.some((o: CatalogOffer) => o.item_id.toUpperCase() === hint)) {
+      return { ok: true, productId: c.id, via: "item_id de la URL" };
     }
+
+    if (list.length === 0) continue; // sin ofertas: no se ofrece como opcion
+
+    enriched.push({
+      ...c,
+      price: list[0].price,
+      offers_count: list.length,
+    });
   }
 
+  if (rough.length === 0) {
+    return {
+      ok: false,
+      candidates: [],
+      error: `No encontré el producto en el catálogo de Mercado Libre a partir de este link.`,
+    };
+  }
+
+  if (enriched.length === 0) {
+    return {
+      ok: false,
+      candidates: [],
+      error:
+        `Encontré el producto en el catálogo de Mercado Libre, pero ninguna de las ` +
+        `variantes tiene ofertas activas: ninguna publicación de ese producto está ` +
+        `participando del catálogo, que es lo único que la API deja consultar. ` +
+        `Este producto no se puede seguir.`,
+    };
+  }
+
+  // Si despues de descartar los muertos queda uno solo, no hay nada que
+  // preguntar.
+  if (enriched.length === 1) {
+    return { ok: true, productId: enriched[0].id, via: "único con ofertas activas" };
+  }
+
+  const candidates = enriched;
   const best = candidates[0];
   const second = candidates[1];
 
-  // Se acepta automaticamente solo si el mejor es bueno Y claramente mejor
-  // que el siguiente. Si no, decide la persona.
   if (best && best.score >= 0.7 && (!second || best.score - second.score >= 0.15)) {
     return { ok: true, productId: best.id, via: "/products/search" };
   }
@@ -1028,8 +1086,107 @@ export async function resolveUserProduct(
     candidates,
     error:
       candidates.length > 0
-        ? `Ese link no dice qué variante es, así que busqué por el nombre y hay ` +
-          `varias parecidas.`
+        ? `Ese link no dice qué variante es. Estas son las que tienen ofertas activas:`
         : `No encontré el producto en el catálogo de Mercado Libre a partir de este link.`,
+  };
+}
+
+// ---------------------------------------------------------------
+// Cobertura: ¿este producto se puede seguir?
+// ---------------------------------------------------------------
+
+/**
+ * Responde, para un nombre de producto, si la API de Mercado Libre permite
+ * seguirlo o no.
+ *
+ * Existe para contestar una pregunta concreta antes de invertir tiempo:
+ * "¿de mi catálogo, cuánto puedo seguir con esta herramienta?". La API solo
+ * deja ver productos que participan del catálogo de ML; el resto (por
+ * ejemplo publicaciones de tienda oficial con variantes internas) no tiene
+ * ningún camino. Medirlo es mejor que suponerlo.
+ */
+export type CoverageRow = {
+  query: string;
+  status: "seguible" | "sin_ofertas" | "no_encontrado" | "error";
+  product_id?: string | null;
+  product_name?: string | null;
+  price?: number | null;
+  offers_count?: number | null;
+  detail?: string;
+};
+
+export async function checkCoverage(
+  name: string,
+  token: string
+): Promise<CoverageRow> {
+  const query = name.trim();
+  if (!query) {
+    return { query, status: "error", detail: "nombre vacío" };
+  }
+
+  const words = query
+    .split(/\s+/)
+    .map((w) => w.toLowerCase())
+    .filter((w) => w.length > 1);
+
+  const search = await mlFetch(
+    `/products/search?status=active&site_id=MLA&q=${encodeURIComponent(query)}`,
+    token
+  );
+
+  if (!search.ok) {
+    return {
+      query,
+      status: "error",
+      detail: `la búsqueda en el catálogo respondió ${search.status}`,
+    };
+  }
+
+  const results: any[] = Array.isArray(search.data?.results)
+    ? search.data.results
+    : [];
+  if (results.length === 0) {
+    return { query, status: "no_encontrado" };
+  }
+
+  const ranked = results
+    .filter((r) => r?.id && r?.name)
+    .map((r) => ({
+      id: String(r.id),
+      name: String(r.name),
+      score: scoreName(String(r.name), words),
+    }))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 4);
+
+  // Se busca el mejor candidato que ADEMAS tenga ofertas activas: un
+  // producto de catálogo sin nadie vendiéndolo no se puede seguir.
+  let bestName: string | null = ranked[0]?.name ?? null;
+  for (const c of ranked) {
+    const offersRes = await mlFetch(`/products/${c.id}/items`, token);
+    if (!offersRes.ok || !Array.isArray(offersRes.data?.results)) continue;
+    const offers = offersRes.data.results
+      .map(toOffer)
+      .filter((o: CatalogOffer | null): o is CatalogOffer => o !== null)
+      .sort((a: CatalogOffer, b: CatalogOffer) => a.price - b.price);
+    if (offers.length === 0) continue;
+
+    return {
+      query,
+      status: "seguible",
+      product_id: c.id,
+      product_name: c.name,
+      price: offers[0].price,
+      offers_count: offers.length,
+    };
+  }
+
+  return {
+    query,
+    status: "sin_ofertas",
+    product_name: bestName,
+    detail:
+      "existe en el catálogo pero ninguna publicación participa del catálogo, " +
+      "así que no hay precio consultable",
   };
 }

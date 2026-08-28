@@ -478,15 +478,81 @@ await test("/api/watchlist: alta y baja logica", async () => {
   assert.equal(res.rows[0].active, false);
 });
 
+await test("las vistas muestran solo lo que se esta siguiendo", async () => {
+  // El problema real: "dejar de seguir" sacaba el producto de la lista pero
+  // seguia apareciendo en Precios de hoy y en Cambios.
+  await q(`DELETE FROM watchlist`);
+  await q(
+    `INSERT INTO watchlist (kind, value, label, ml_id, id_kind, active)
+     VALUES ('url','u1','Sigo este','MLA100','product',TRUE),
+            ('url','u2','Ya no sigo este','MLA200','product',FALSE)`
+  );
+
+  const listings = await q(
+    `SELECT l.ml_id FROM listings l
+     WHERE ($1 OR EXISTS (SELECT 1 FROM watchlist w WHERE w.ml_id = l.ml_id AND w.active))`,
+    [false]
+  );
+  assert.deepEqual(listings.rows.map((r) => r.ml_id), ["MLA100"]);
+
+  const changes = await q(
+    `SELECT DISTINCT c.ml_id FROM changes c
+     WHERE ($1 OR EXISTS (SELECT 1 FROM watchlist w WHERE w.ml_id = c.ml_id AND w.active))`,
+    [false]
+  );
+  assert.deepEqual(changes.rows.map((r) => r.ml_id), ["MLA100"]);
+});
+
+await test("con ?all=1 se ven todos, incluidos los que dejaste de seguir", async () => {
+  const res = await q(
+    `SELECT l.ml_id FROM listings l
+     WHERE ($1 OR EXISTS (SELECT 1 FROM watchlist w WHERE w.ml_id = l.ml_id AND w.active))
+     ORDER BY l.ml_id`,
+    [true]
+  );
+  assert.equal(res.rows.length, 2);
+});
+
+await test("dejar de seguir NO borra el historial", async () => {
+  const res = await q(
+    `SELECT COUNT(*)::int AS n FROM price_snapshots WHERE ml_id = 'MLA200'`
+  );
+  assert.ok(res.rows[0].n > 0, "se perdio el historial al dejar de seguir");
+});
+
+await test("borrar definitivamente se lleva todo", async () => {
+  const wl = await q(`SELECT id FROM watchlist WHERE ml_id = 'MLA200'`);
+  const id = wl.rows[0].id;
+
+  await q(`DELETE FROM changes WHERE ml_id = 'MLA200'`);
+  await q(`DELETE FROM price_snapshots WHERE ml_id = 'MLA200'`);
+  await q(`DELETE FROM listings WHERE ml_id = 'MLA200'`);
+  await q(`DELETE FROM watchlist WHERE id = $1`, [id]);
+
+  for (const t of ["changes", "price_snapshots", "listings"]) {
+    const res = await q(`SELECT COUNT(*)::int AS n FROM ${t} WHERE ml_id = 'MLA200'`);
+    assert.equal(res.rows[0].n, 0, `quedaron filas en ${t}`);
+  }
+  const wl2 = await q(`SELECT COUNT(*)::int AS n FROM watchlist WHERE ml_id = 'MLA200'`);
+  assert.equal(wl2.rows[0].n, 0);
+
+  // Y lo que si seguimos no se toco.
+  const otro = await q(`SELECT COUNT(*)::int AS n FROM listings WHERE ml_id = 'MLA100'`);
+  assert.equal(otro.rows[0].n, 1, "borro de mas");
+});
+
 await test("agregar una marca nueva no borra el historial existente", async () => {
   const res = await q(`SELECT COUNT(*)::int AS n FROM price_snapshots`);
   assert.ok(res.rows[0].n >= 6);
 });
 
 await test("schema.sql se puede re-ejecutar sin romper nada (idempotente)", async () => {
+  // Se compara contra el estado previo, no contra un número fijo: los tests
+  // de arriba agregan y borran filas.
+  const antes = await q(`SELECT COUNT(*)::int AS n FROM listings`);
   await q(schema);
-  const res = await q(`SELECT COUNT(*)::int AS n FROM listings`);
-  assert.equal(res.rows[0].n, 2);
+  const despues = await q(`SELECT COUNT(*)::int AS n FROM listings`);
+  assert.equal(despues.rows[0].n, antes.rows[0].n);
 });
 
 // ---------------------------------------------------------------

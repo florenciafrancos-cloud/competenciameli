@@ -21,6 +21,7 @@ export async function GET(req: Request) {
   const type = searchParams.get("type");
   const brand = searchParams.get("brand");
   const limit = Math.min(Number(searchParams.get("limit") ?? 300) || 300, 2000);
+  const all = searchParams.get("all") === "1";
 
   try {
     // Se trae el SKU desde listings: los cambios viejos quedaron guardados
@@ -29,7 +30,11 @@ export async function GET(req: Request) {
       SELECT c.*, l.sku, l.price AS current_price
       FROM changes c
       LEFT JOIN listings l ON l.ml_id = c.ml_id
-      WHERE c.detected_at >= NOW() - (${days} || ' days')::interval
+      WHERE (${all} OR EXISTS (
+              SELECT 1 FROM watchlist w
+              WHERE w.ml_id = c.ml_id AND w.active
+            ))
+        AND c.detected_at >= NOW() - (${days} || ' days')::interval
         AND (${type}::text IS NULL OR c.change_type = ${type})
         AND (${brand}::text IS NULL OR LOWER(c.brand) = LOWER(${brand}))
       ORDER BY c.detected_at DESC, c.id DESC

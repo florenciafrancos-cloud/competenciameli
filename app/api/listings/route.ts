@@ -22,6 +22,10 @@ export async function GET(req: Request) {
   const seller = searchParams.get("seller");
   const status = searchParams.get("status") ?? "all";
   const q = searchParams.get("q");
+  // Por defecto se muestran solo los productos que se estan siguiendo.
+  // Los que se dejaron de seguir quedan guardados (el historial no se
+  // pierde) pero no ensucian la vista.
+  const all = searchParams.get("all") === "1";
   const limit = Math.min(Number(searchParams.get("limit") ?? 500) || 500, 2000);
 
   try {
@@ -29,7 +33,11 @@ export async function GET(req: Request) {
       SELECT l.*,
              (SELECT COUNT(*) FROM price_snapshots s WHERE s.ml_id = l.ml_id) AS snapshots
       FROM listings l
-      WHERE (${status} = 'all' OR l.status = ${status})
+      WHERE (${all} OR EXISTS (
+              SELECT 1 FROM watchlist w
+              WHERE w.ml_id = l.ml_id AND w.active
+            ))
+        AND (${status} = 'all' OR l.status = ${status})
         AND (${brand}::text IS NULL OR LOWER(l.brand) = LOWER(${brand}))
         AND (${seller}::text IS NULL OR LOWER(l.seller) = LOWER(${seller}))
         AND (${q}::text IS NULL OR l.title ILIKE '%' || ${q} || '%')

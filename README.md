@@ -210,8 +210,21 @@ producto equivocado.
 
 El `?wid=MLA…` se ignora a propósito: apunta a una publicación bloqueada.
 
-- **Dejar de seguir**: un click. No se borra el historial: si la volvés a
-  agregar, la serie de precios sigue estando.
+- **Dejar de seguir**: un click. El producto desaparece de *Precios de hoy* y
+  de *Cambios*, y deja de consultarse en el control diario, pero **el historial
+  de precios queda guardado**: si lo volvés a agregar, la serie sigue donde
+  estaba.
+- **Borrar**: elimina el producto y todo su historial, sin vuelta atrás. Está
+  en la lista desplegable "Ver los que dejaste de seguir", al pie de la
+  pestaña. Es para limpiar lo que se cargó por error o de prueba.
+
+Las dos cosas son distintas a propósito. Perder el historial de precios de un
+competidor por querer sacarlo del tablero sería caro y silencioso, así que
+dejar de seguir nunca borra nada.
+
+> Las pestañas *Precios de hoy* y *Cambios* muestran **solo lo que estás
+> siguiendo**. Para ver todo, incluidos los dados de baja, agregá `?all=1` a
+> `/api/listings` o `/api/changes`.
 
 Cada ficha de catálogo son dos pedidos a la API (el producto y sus ofertas),
 así que seguir 50 productos son 100 pedidos por control: cómodo dentro de los
@@ -302,7 +315,7 @@ cadena de conexión la saca de Vercel → Storage → tu base → `.env.local`).
 
 ### Tests
 
-Hay **150 tests**. Necesitan un Postgres local:
+Hay **154 tests**. Necesitan un Postgres local:
 
 ```bash
 npm test
@@ -363,7 +376,7 @@ lib/
   db.ts                     Conexión a Postgres
   auth.ts                   Sesión del tablero
 db/schema.sql               Las tablas y las migraciones
-tests/                      150 tests
+tests/                      154 tests
 vercel.json                 El horario del cron
 ```
 

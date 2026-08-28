@@ -412,6 +412,42 @@ export default function Home() {
     load();
   }
 
+  /** Vuelve a seguir algo que se había dado de baja, con su link original. */
+  async function addAgain(value: string) {
+    setSaving(true);
+    setAddMsg(null);
+    try {
+      const res = await fetch("/api/watchlist", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ value }),
+      });
+      const d = await res.json();
+      setAddMsg(
+        res.ok
+          ? { ok: true, text: `Volviste a seguir: ${d.listing.title}` }
+          : { ok: false, text: d.error ?? "No se pudo." }
+      );
+      load();
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  /** Borrado definitivo: se va también el historial. */
+  async function purgeWatch(id: number, nombre: string) {
+    const ok = window.confirm(
+      `Borrar definitivamente “${nombre}”?\n\n` +
+        `Se elimina el producto y todo su historial de precios. ` +
+        `Esto no se puede deshacer.\n\n` +
+        `Si solo querés dejar de seguirlo y conservar el historial, ` +
+        `usá “dejar de seguir”.`
+    );
+    if (!ok) return;
+    await fetch(`/api/watchlist?id=${id}&purge=1`, { method: "DELETE" });
+    load();
+  }
+
   const lastRun = stats?.last_run;
 
   return (
@@ -1041,21 +1077,54 @@ export default function Home() {
           </div>
 
           {watchlist.some((w) => !w.active) && (
-            <details className="mt-5">
+            <details className="mt-6">
               <summary className="muted text-[13px] cursor-pointer">
                 Ver {watchlist.filter((w) => !w.active).length} que dejaste de
                 seguir
               </summary>
-              <ul className="muted text-[12px] mt-2 space-y-1">
-                {watchlist
-                  .filter((w) => !w.active)
-                  .map((w) => (
-                    <li key={w.id}>
-                      {w.title || w.label || w.value}
-                      {w.kind !== "url" && ` (${w.kind}: ya no se puede relevar)`}
-                    </li>
-                  ))}
-              </ul>
+              <p className="muted text-[12px] mt-2 mb-3 max-w-2xl">
+                Estos ya no aparecen en “Precios de hoy” ni en “Cambios”, y no se
+                consultan en el control diario. El historial de precios sigue
+                guardado por si los volvés a agregar. Si fueron pruebas y no los
+                querés más, borralos.
+              </p>
+              <div className="scroll-x">
+                <table className="data">
+                  <tbody>
+                    {watchlist
+                      .filter((w) => !w.active)
+                      .map((w) => (
+                        <tr key={w.id}>
+                          <td className="muted">
+                            {w.title || w.label || w.value}
+                            {w.kind !== "url" && (
+                              <div className="text-[11px]">
+                                {w.kind}: ya no se puede relevar
+                              </div>
+                            )}
+                          </td>
+                          <td className="muted text-[11px] tabular">{w.ml_id}</td>
+                          <td className="text-right whitespace-nowrap">
+                            <button
+                              onClick={() => addAgain(w.value)}
+                              className="muted text-[12px] underline decoration-dotted mr-3"
+                            >
+                              volver a seguir
+                            </button>
+                            <button
+                              onClick={() =>
+                                purgeWatch(w.id, w.title || w.label || w.ml_id)
+                              }
+                              className="text-up text-[12px] underline decoration-dotted"
+                            >
+                              borrar
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                  </tbody>
+                </table>
+              </div>
             </details>
           )}
         </section>

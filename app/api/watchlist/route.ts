@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { sql } from "@/lib/db";
 import { ensureSchema } from "@/lib/ensure-schema";
+import { isLoggedIn } from "@/lib/auth";
 import {
   getAccessToken,
   parseMlLink,
@@ -229,16 +230,51 @@ async function addProduct(
   }
 }
 
-/** DELETE /api/watchlist?id=3  -> deja de seguirla (conserva el historial) */
+/**
+ * DELETE /api/watchlist?id=3            deja de seguirlo (conserva historial)
+ * DELETE /api/watchlist?id=3&purge=1    lo borra por completo
+ *
+ * Son dos cosas distintas a propósito:
+ *
+ *   - Dejar de seguir: el producto desaparece del tablero pero el historial
+ *     de precios queda. Si lo volvés a agregar, la serie sigue donde estaba.
+ *   - Borrar: se va todo, incluido el historial. No tiene vuelta atrás.
+ *     Es para limpiar lo que se cargó por error o de prueba.
+ */
 export async function DELETE(req: Request) {
-  await ensureSchema((t, p) => sql.query(t, p ?? []));
-  const id = new URL(req.url).searchParams.get("id");
+  await ensureSchema(query);
+  if (!(await isLoggedIn())) {
+    return NextResponse.json({ error: "no autorizado" }, { status: 401 });
+  }
+
+  const params = new URL(req.url).searchParams;
+  const id = params.get("id");
+  const purge = params.get("purge") === "1";
   if (!id) return NextResponse.json({ error: "falta id" }, { status: 400 });
+
   try {
-    await sql.query(`UPDATE watchlist SET active = FALSE WHERE id = $1`, [
-      Number(id),
-    ]);
-    return NextResponse.json({ ok: true });
+    const found = await query(
+      `SELECT ml_id, label FROM watchlist WHERE id = $1`,
+      [Number(id)]
+    );
+    const mlId: string | null = found.rows[0]?.ml_id ?? null;
+
+    if (!purge) {
+      await query(`UPDATE watchlist SET active = FALSE WHERE id = $1`, [
+        Number(id),
+      ]);
+      return NextResponse.json({ ok: true, purged: false, ml_id: mlId });
+    }
+
+    // Borrado definitivo. El orden importa: primero lo que referencia.
+    if (mlId) {
+      await query(`DELETE FROM changes WHERE ml_id = $1`, [mlId]);
+      await query(`DELETE FROM price_snapshots WHERE ml_id = $1`, [mlId]);
+      await query(`DELETE FROM listings WHERE ml_id = $1`, [mlId]);
+    }
+    await query(`DELETE FROM watchlist WHERE id = $1`, [Number(id)]);
+
+    return NextResponse.json({ ok: true, purged: true, ml_id: mlId });
   } catch (err) {
     return NextResponse.json(
       { error: err instanceof Error ? err.message : String(err) },

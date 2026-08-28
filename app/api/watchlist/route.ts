@@ -25,6 +25,7 @@ export async function GET() {
     const res = await sql.query(
       `SELECT w.id, w.kind, w.value, w.label, w.notes, w.ml_id, w.active,
               COALESCE(w.id_kind, 'item') AS id_kind,
+              w.sku,
               w.created_at,
               l.title, l.price, l.seller, l.ml_status, l.status,
               l.available_quantity, l.url, l.last_seen_at
@@ -69,6 +70,7 @@ export async function POST(req: Request) {
    * pedia copiar un codigo a mano. Eso es trasladarle el problema al
    * usuario: elegir tiene que ser un click.
    */
+  const skuFromBody = String(body?.sku ?? "").trim() || null;
   const chosenProductId = String(body?.product_id ?? "").trim().toUpperCase();
   if (chosenProductId) {
     if (!/^ML[A-Z]\d{4,}$/.test(chosenProductId)) {
@@ -77,7 +79,7 @@ export async function POST(req: Request) {
         { status: 400 }
       );
     }
-    return addProduct(chosenProductId, "product", raw || null);
+    return addProduct(chosenProductId, "product", raw || null, skuFromBody);
   }
 
   if (!raw) {
@@ -128,7 +130,7 @@ export async function POST(req: Request) {
       effectiveKind = parsed.kind === "product" ? "product" : "item";
     }
 
-    return addProduct(effectiveId, effectiveKind, raw);
+    return addProduct(effectiveId, effectiveKind, raw, skuFromBody);
   } catch (err) {
     return NextResponse.json(
       { error: err instanceof Error ? err.message : String(err) },
@@ -144,7 +146,8 @@ export async function POST(req: Request) {
 async function addProduct(
   id: string,
   kind: "item" | "product",
-  sourceUrl: string | null
+  sourceUrl: string | null,
+  sku: string | null = null
 ) {
   try {
     const token = await getAccessToken(query);
@@ -168,20 +171,22 @@ async function addProduct(
     const l = preview.listing;
 
     await query(
-      `INSERT INTO watchlist (kind, value, label, notes, ml_id, id_kind, active)
-       VALUES ('url', $1, $2, $3, $4, $5, TRUE)
+      `INSERT INTO watchlist (kind, value, label, notes, ml_id, id_kind, sku, active)
+       VALUES ('url', $1, $2, $3, $4, $5, $6, TRUE)
        ON CONFLICT (kind, value) DO UPDATE
          SET active  = TRUE,
              label   = EXCLUDED.label,
              notes   = EXCLUDED.notes,
              ml_id   = EXCLUDED.ml_id,
-             id_kind = EXCLUDED.id_kind`,
+             id_kind = EXCLUDED.id_kind,
+             sku     = COALESCE(EXCLUDED.sku, watchlist.sku)`,
       [
         sourceUrl || l.url || id,
         String(l.title).slice(0, 300),
         null,
         id,
         preview.kind,
+        sku,
       ]
     );
 
@@ -196,10 +201,15 @@ async function addProduct(
       query
     );
 
+    if (sku) {
+      await query(`UPDATE listings SET sku = $2 WHERE ml_id = $1`, [id, sku]);
+    }
+
     return NextResponse.json({
       ok: true,
       ml_id: id,
       kind: preview.kind,
+      sku,
       listing: {
         title: l.title,
         price: l.price,

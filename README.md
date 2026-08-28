@@ -132,6 +132,15 @@ los cambios se ven únicamente en el tablero:
 | `ALERT_EMAIL_TO` | Tu mail. Varios separados por coma |
 | `ALERT_EMAIL_FROM` | `onboarding@resend.dev` sirve para arrancar |
 
+Y para comparar contra tus propios precios:
+
+| Variable | Qué es |
+|---|---|
+| `SHEET_CSV_URL` | URL de tu Google Sheet publicado como CSV (ver abajo) |
+| `SHEET_SKU_COL` | Columna del SKU. Default `A` |
+| `SHEET_PRICE_COL` | Columna del precio. Default `E` |
+| `SHEET_NAME_COL` | Columna del nombre, para reconocer el SKU en la lista. Default `B` |
+
 Para generar las claves: `openssl rand -hex 32`.
 
 Después de cargarlas, **Deployments → Redeploy**. Las variables nuevas no
@@ -210,6 +219,37 @@ límites.
 
 ---
 
+## Tus SKU y precios: comparar contra la competencia
+
+En el Sheet donde tenés tu catálogo: **Archivo → Compartir → Publicar en la
+web → elegí la hoja** (no "Todo el documento") **→ CSV → Publicar**. Copiá la
+URL y ponela en `SHEET_CSV_URL`.
+
+A partir de ahí, cuando agregás un producto podés elegir tu SKU de una lista,
+y el tablero muestra:
+
+| Producto | Mejor precio ML | Tu SKU | Tu precio | Diferencia |
+|---|---|---|---|---|
+| Bubba Dual Sip 1.53L | $63.599 | P02.015 | $68.000 | **+6,9% estás arriba** |
+
+También se puede asignar o cambiar el SKU de un producto que ya venías
+siguiendo, desde la misma tabla.
+
+**El precio no se copia a la base**: se lee del Sheet cada vez (con caché de 5
+minutos). Actualizás el Sheet y la comparación se recalcula sola, sin tocar la
+app.
+
+Dos cosas que el código cuida acá, porque son las que harían que la
+comparación mienta:
+
+- **Un SKU sin precio queda como "sin precio", nunca como cero.** Un cero
+  inventado mostraría "estás 100% arriba".
+- **Si el Sheet deja de estar publicado**, Google devuelve una página de login
+  en lugar del CSV. La app detecta que recibió HTML, avisa, y conserva la
+  última lista buena en vez de parsear el HTML y generar SKUs inventados.
+
+---
+
 ## Cuándo corre
 
 Todos los días a las **9:00 de Argentina** (`vercel.json`, en UTC:
@@ -254,7 +294,7 @@ cadena de conexión la saca de Vercel → Storage → tu base → `.env.local`).
 
 ### Tests
 
-Hay **123 tests**. Necesitan un Postgres local:
+Hay **145 tests**. Necesitan un Postgres local:
 
 ```bash
 npm test
@@ -311,10 +351,11 @@ lib/
   diff.ts                   Las reglas de qué cuenta como cambio
   notify.ts                 El mail de alerta
   sql-split.ts              Parte el schema.sql en sentencias
+  skus.ts                   Lee tus SKU y precios del Sheet publicado
   db.ts                     Conexión a Postgres
   auth.ts                   Sesión del tablero
 db/schema.sql               Las tablas y las migraciones
-tests/                      123 tests
+tests/                      145 tests
 vercel.json                 El horario del cron
 ```
 

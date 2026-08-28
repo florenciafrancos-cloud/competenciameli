@@ -189,6 +189,13 @@ export default function Home() {
     null
   );
 
+  // Lista de SKU propios, leida del Sheet publicado
+  const [skus, setSkus] = useState<
+    { sku: string; price: number | null; label?: string | null }[]
+  >([]);
+  const [skusError, setSkusError] = useState<string | null>(null);
+  const [newSku, setNewSku] = useState("");
+
   // Prueba de cobertura: cuanto del catalogo propio se puede seguir
   const [covText, setCovText] = useState("");
   const [covRunning, setCovRunning] = useState(false);
@@ -208,11 +215,12 @@ export default function Home() {
       const lq = new URLSearchParams({ status: statusFilter });
       if (q) lq.set("q", q);
 
-      const [s, c, l, w] = await Promise.all([
+      const [s, c, l, w, sk] = await Promise.all([
         fetch("/api/stats").then((r) => r.json()),
         fetch(`/api/changes?${cq}`).then((r) => r.json()),
         fetch(`/api/listings?${lq}`).then((r) => r.json()),
         fetch("/api/watchlist").then((r) => r.json()),
+        fetch("/api/skus").then((r) => r.json()).catch(() => ({ skus: [] })),
       ]);
       if (s.error || c.error || l.error || w.error) {
         throw new Error(s.error || c.error || l.error || w.error);
@@ -221,6 +229,8 @@ export default function Home() {
       setChanges(c.changes ?? []);
       setListings(l.listings ?? []);
       setWatchlist(w.watchlist ?? []);
+      setSkus(sk?.skus ?? []);
+      setSkusError(sk?.error ?? null);
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
     } finally {
@@ -307,7 +317,7 @@ export default function Home() {
       const res = await fetch("/api/watchlist", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ value }),
+        body: JSON.stringify({ value, sku: newSku || null }),
       });
       const d = await res.json();
       if (!res.ok) {
@@ -341,7 +351,11 @@ export default function Home() {
       const res = await fetch("/api/watchlist", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ product_id: productId, value: newLink.trim() }),
+        body: JSON.stringify({
+          product_id: productId,
+          value: newLink.trim(),
+          sku: newSku || null,
+        }),
       });
       const d = await res.json();
       if (!res.ok) {
@@ -354,6 +368,7 @@ export default function Home() {
           }`,
         });
         setNewLink("");
+        setNewSku("");
         setCandidates([]);
         load();
       }
@@ -362,6 +377,16 @@ export default function Home() {
     } finally {
       setSaving(false);
     }
+  }
+
+  /** Asocia un SKU a un producto que ya se está siguiendo. */
+  async function setSku(mlId: string, sku: string) {
+    await fetch("/api/watchlist/sku", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ml_id: mlId, sku }),
+    });
+    load();
   }
 
   async function runCoverage() {
@@ -518,6 +543,9 @@ export default function Home() {
               placeholder="Pegá acá la URL del producto en Mercado Libre"
               className="rounded-md border hairline bg-transparent px-3 py-2 w-full max-w-xl"
             />
+            {skus.length > 0 && (
+              <SkuSelect value={newSku} skus={skus} onChange={setNewSku} />
+            )}
             <button
               onClick={addLink}
               disabled={saving || !newLink.trim()}
@@ -526,6 +554,11 @@ export default function Home() {
               {saving ? "Verificando…" : "Agregar"}
             </button>
           </div>
+          {skusError && (
+            <p className="muted text-[12px] mt-2">
+              Lista de SKU no disponible: {skusError}
+            </p>
+          )}
           {addMsg && (
             <p className={`text-[13px] mt-2 whitespace-pre-wrap ${addMsg.ok ? "muted" : "text-up"}`}>
               {addMsg.text}
@@ -747,6 +780,9 @@ export default function Home() {
                   <th style={{ textAlign: "right" }}>Precio</th>
                   <th style={{ textAlign: "right" }}>Desc.</th>
                   <th style={{ textAlign: "right" }}>Ofertas</th>
+                  <th>Tu SKU</th>
+                  <th style={{ textAlign: "right" }}>Tu precio</th>
+                  <th style={{ textAlign: "right" }}>Diferencia</th>
                   <th>Cuotas</th>
                   <th>Estado</th>
                   <th>Visto</th>
@@ -804,6 +840,31 @@ export default function Home() {
                         <td className="tabular text-right muted">
                           {l.offers_count ?? "—"}
                         </td>
+                        <td onClick={(e) => e.stopPropagation()}>
+                          {skus.length > 0 ? (
+                            <SkuSelect
+                              value={(l as any).sku ?? ""}
+                              skus={skus}
+                              onChange={(v) => setSku(l.ml_id, v)}
+                              compact
+                            />
+                          ) : (
+                            <span className="muted text-[12px]">
+                              {(l as any).sku ?? "—"}
+                            </span>
+                          )}
+                        </td>
+                        <td className="tabular text-right whitespace-nowrap">
+                          {(l as any).own_price != null
+                            ? money((l as any).own_price)
+                            : "—"}
+                        </td>
+                        <td className="tabular text-right whitespace-nowrap">
+                          <Diferencia
+                            diffAbs={(l as any).diff_abs}
+                            diffPct={(l as any).diff_pct}
+                          />
+                        </td>
                         <td className="muted text-[12px]">
                           {l.has_installments === null
                             ? "—"
@@ -827,7 +888,7 @@ export default function Home() {
                       </tr>
                       {openRow === l.ml_id && (
                         <tr>
-                          <td colSpan={9} className="subtle">
+                          <td colSpan={12} className="subtle">
                             <div className="p-2">
                               <div className="text-[11px] uppercase tracking-wide muted mb-2">
                                 Evolución de precio
@@ -869,6 +930,9 @@ export default function Home() {
               placeholder="Pegá acá la URL del producto en Mercado Libre"
               className="rounded-md border hairline bg-transparent px-3 py-2 w-full max-w-xl"
             />
+            {skus.length > 0 && (
+              <SkuSelect value={newSku} skus={skus} onChange={setNewSku} />
+            )}
             <button
               onClick={addLink}
               disabled={saving || !newLink.trim()}
@@ -877,6 +941,11 @@ export default function Home() {
               {saving ? "Verificando…" : "Agregar"}
             </button>
           </div>
+          {skusError && (
+            <p className="muted text-[12px] mb-2">
+              Lista de SKU no disponible: {skusError}
+            </p>
+          )}
           {addMsg && (
             <p className={`text-[13px] mb-2 whitespace-pre-wrap ${addMsg.ok ? "muted" : "text-up"}`}>
               {addMsg.text}
@@ -893,7 +962,7 @@ export default function Home() {
               <thead>
                 <tr>
                   <th>Publicación</th>
-                  <th>ID / tipo</th>
+                  <th>Tu SKU</th>
                   <th style={{ textAlign: "right" }}>Último precio</th>
                   <th>Estado</th>
                   <th></th>
@@ -920,10 +989,19 @@ export default function Home() {
                             w.title || w.label
                           )}
                         </td>
-                        <td className="muted text-[12px] tabular">
-                          {w.ml_id}
-                          <div className="text-[11px]">
-                            {w.id_kind === "product" ? "catálogo" : "publicación"}
+                        <td>
+                          {skus.length > 0 ? (
+                            <SkuSelect
+                              value={w.sku ?? ""}
+                              skus={skus}
+                              onChange={(v) => setSku(w.ml_id, v)}
+                              compact
+                            />
+                          ) : (
+                            <span className="muted text-[12px]">{w.sku ?? "—"}</span>
+                          )}
+                          <div className="muted text-[11px] tabular mt-1">
+                            {w.ml_id} · {w.id_kind === "product" ? "catálogo" : "publicación"}
                           </div>
                         </td>
                         <td className="tabular text-right whitespace-nowrap">
@@ -1113,6 +1191,67 @@ export default function Home() {
         )}
       </footer>
     </main>
+  );
+}
+
+function SkuSelect({
+  value,
+  skus,
+  onChange,
+  compact,
+}: {
+  value: string;
+  skus: { sku: string; price: number | null; label?: string | null }[];
+  onChange: (sku: string) => void;
+  compact?: boolean;
+}) {
+  const chosen = skus.find((s) => s.sku === value);
+  return (
+    <span className="inline-flex items-center gap-2">
+      <select
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        className={`rounded-md border hairline bg-transparent ${
+          compact ? "px-1.5 py-1 text-[12px]" : "px-2 py-2 text-[13px]"
+        }`}
+      >
+        <option value="">— sin SKU —</option>
+        {skus.map((s) => (
+          <option key={s.sku} value={s.sku}>
+            {s.sku}
+            {s.label ? ` · ${s.label}` : ""}
+            {s.price != null ? ` · ${money(s.price)}` : " · sin precio"}
+          </option>
+        ))}
+      </select>
+      {chosen && (
+        <span className="muted text-[12px] tabular whitespace-nowrap">
+          {chosen.price != null ? money(chosen.price) : "sin precio"}
+        </span>
+      )}
+    </span>
+  );
+}
+
+/** Cuánto más caro (o barato) estás vos respecto del mejor de ML. */
+function Diferencia({
+  diffAbs,
+  diffPct,
+}: {
+  diffAbs: number | null | undefined;
+  diffPct: number | null | undefined;
+}) {
+  if (diffAbs == null || diffPct == null) return <span className="muted">—</span>;
+  if (Math.abs(diffPct) < 0.05) return <span className="muted">igual</span>;
+  const arriba = diffAbs > 0;
+  return (
+    <span className={arriba ? "text-up" : "text-down"}>
+      {arriba ? "+" : ""}
+      {diffPct.toFixed(1)}%
+      <span className="muted block text-[11px]">
+        {arriba ? "estás arriba" : "estás abajo"}
+      </span>
+    </span>
   );
 }
 

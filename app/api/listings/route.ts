@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { sql } from "@/lib/db";
 import { ensureSchema } from "@/lib/ensure-schema";
+import { getSkuList } from "@/lib/skus";
 import type { ListingRow } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -35,7 +36,29 @@ export async function GET(req: Request) {
       ORDER BY l.brand NULLS LAST, l.price ASC
       LIMIT ${limit}
     `;
-    return NextResponse.json({ count: res.rows.length, listings: res.rows });
+    // Se adjunta el precio propio leyendo el Sheet, para que actualizarlo
+    // ahí se refleje sin tocar la base.
+    const { rows: skus } = await getSkuList();
+    const bySku = new Map(skus.map((s) => [s.sku.toUpperCase(), s]));
+
+    const listings = res.rows.map((l: any) => {
+      const own = l.sku ? bySku.get(String(l.sku).toUpperCase()) : undefined;
+      const ownPrice = own?.price ?? null;
+      const price = l.price !== null ? Number(l.price) : null;
+      return {
+        ...l,
+        own_price: ownPrice,
+        // Diferencia entre TU precio y el mejor de la competencia.
+        // Positivo = estás más caro.
+        diff_abs: ownPrice !== null && price !== null ? ownPrice - price : null,
+        diff_pct:
+          ownPrice !== null && price !== null && price !== 0
+            ? Number((((ownPrice - price) / price) * 100).toFixed(1))
+            : null,
+      };
+    });
+
+    return NextResponse.json({ count: listings.length, listings });
   } catch (err) {
     return NextResponse.json(
       { error: err instanceof Error ? err.message : String(err) },

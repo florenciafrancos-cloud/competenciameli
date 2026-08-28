@@ -8,10 +8,11 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
-    "test": "tsx tests/setup.test.mjs && tsx tests/ingest.test.mjs && tsx tests/ml-api.test.mjs",
+    "test": "tsx tests/setup.test.mjs && tsx tests/skus.test.mjs && tsx tests/ingest.test.mjs && tsx tests/ml-api.test.mjs",
     "test:ingest": "tsx tests/ingest.test.mjs",
     "test:ml": "tsx tests/ml-api.test.mjs",
-    "test:setup": "tsx tests/setup.test.mjs"
+    "test:setup": "tsx tests/setup.test.mjs",
+    "test:skus": "tsx tests/skus.test.mjs"
   },
   "dependencies": {
     "@neondatabase/serverless": "^1.1.0",

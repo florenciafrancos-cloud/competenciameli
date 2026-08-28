@@ -151,3 +151,12 @@ ALTER TABLE listings  ADD COLUMN IF NOT EXISTS id_kind TEXT NOT NULL DEFAULT 'it
 -- el producto se puso mas peleado.
 ALTER TABLE listings        ADD COLUMN IF NOT EXISTS offers_count INT;
 ALTER TABLE price_snapshots ADD COLUMN IF NOT EXISTS offers_count INT;
+
+-- SKU propio asociado a cada producto seguido. El precio NO se guarda acá:
+-- se lee del Sheet en cada consulta, para que actualizar el Sheet alcance.
+ALTER TABLE listings ADD COLUMN IF NOT EXISTS sku TEXT;
+ALTER TABLE watchlist ADD COLUMN IF NOT EXISTS sku TEXT;
+
+-- En el historial sí se guarda el precio propio del momento, para que una
+-- comparación vieja siga significando lo mismo dentro de seis meses.
+ALTER TABLE price_snapshots ADD COLUMN IF NOT EXISTS own_price NUMERIC(12,2);

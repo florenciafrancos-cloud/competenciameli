@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { sql } from "@/lib/db";
+import { ensureSchema } from "@/lib/ensure-schema";
 import { runIngest, IngestError, type Query } from "@/lib/ingest-core";
 import { sendAlertEmail } from "@/lib/notify";
 import type { IngestPayload } from "@/lib/types";
@@ -16,6 +17,7 @@ export const maxDuration = 60;
  * Header obligatorio:  Authorization: Bearer <INGEST_SECRET>
  */
 export async function POST(req: Request) {
+  await ensureSchema((t, p) => sql.query(t, p ?? []));
   // ---- Auth ----
   const secret = process.env.INGEST_SECRET;
   if (!secret) {
@@ -61,6 +63,7 @@ export async function POST(req: Request) {
 
 /** GET de cortesia: documenta el formato esperado. */
 export async function GET() {
+  await ensureSchema((t, p) => sql.query(t, p ?? []));
   return NextResponse.json({
     endpoint: "/api/ingest",
     method: "POST",

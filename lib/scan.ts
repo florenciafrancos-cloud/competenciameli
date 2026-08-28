@@ -69,6 +69,10 @@ export async function runScan(
         unparsed.push(row.value);
         continue;
       }
+      if (parsed.kind === "user_product") {
+        unparsed.push(row.value);
+        continue;
+      }
       if (parsed.kind === "product") {
         // El permalink de las fichas viene vacio en la API, asi que se
         // conserva el link que pego el usuario para poder abrirlo.

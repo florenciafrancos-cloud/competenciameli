@@ -173,22 +173,33 @@ Pestaña **Qué se monitorea**:
 
 - **Agregar**: pegás el link y listo.
 
-Mercado Libre tiene tres formas de URL, y la app las resuelve así:
+**Pegá la URL completa**, tal como sale de la barra de direcciones del
+navegador: buscás el producto en Mercado Libre, entrás al resultado, copiás.
+Lo que viene después del `?` no es basura — sirve para identificar exactamente
+qué producto y qué variante estás mirando.
 
-| Link | Se sigue como |
+| Forma de URL | Cómo se resuelve |
 |---|---|
-| `mercadolibre.com.ar/.../p/MLA67012657` | Ficha de catálogo ✅ |
-| `mercadolibre.com.ar/.../up/MLAU…?product_trigger_id=MLA74954916` | Ficha de catálogo (usa el `product_trigger_id`) ✅ |
-| `articulo.mercadolibre.com.ar/MLA-1234567890-...` | Publicación de un vendedor — **ML la bloquea**; la app intenta resolverla como ficha de catálogo y, si no puede, te explica qué link pegar |
+| `.../p/MLA67012657` | Ficha de catálogo, directo ✅ |
+| `.../up/MLAU…?product_trigger_id=MLA749…` | Ficha de catálogo, vía el `product_trigger_id` ✅ |
+| `.../up/MLAU…?pdp_filters=item_id:MLA351…` | Se busca el producto por el nombre de la URL, y el `item_id` elige la variante exacta ✅ |
+| `.../up/MLAU…` pelado | Se busca por el nombre; si hay varias variantes parecidas, la app te muestra las opciones para que elijas |
+| `articulo.mercadolibre.com.ar/MLA-123…` | ML la bloquea; se intenta resolver como ficha de catálogo |
 
-El `?wid=MLA…` que a veces traen las URLs de catálogo se ignora a propósito:
-apunta a la publicación de un vendedor, que está bloqueada.
+Dos cosas que importan de esta lista:
 
-El orden en que se reconocen estos formatos importa, y fue la causa de un bug:
-buscar "el primer MLA seguido de números" en un link `/up/…` agarraba el
-`product_trigger_id` del final y lo trataba como publicación, dando un 404 sin
-explicación. Ahora se resuelve por la **forma** de la URL, no por la primera
-coincidencia. Hay un test de regresión con la URL real que lo destapó.
+**Los resultados de búsqueda de ML hoy llevan a `/up/`, no a `/p/`.** Las
+primeras versiones de este README decían "buscá y hacé click para obtener un
+link `/p/`" — está mal, y por eso los `/up/` son el caso principal, no la
+excepción.
+
+**El `item_id` de `pdp_filters` es el desambiguador preciso.** No se puede leer
+esa publicación (403), pero el producto de catálogo correcto es el único cuya
+lista de ofertas la contiene. Sin ese dato, entre "Autoseal Negro" y "Autoseal
+Blanco" habría que preguntar; con él se resuelve solo y sin riesgo de seguir el
+producto equivocado.
+
+El `?wid=MLA…` se ignora a propósito: apunta a una publicación bloqueada.
 
 - **Dejar de seguir**: un click. No se borra el historial: si la volvés a
   agregar, la serie de precios sigue estando.
@@ -243,7 +254,7 @@ cadena de conexión la saca de Vercel → Storage → tu base → `.env.local`).
 
 ### Tests
 
-Hay **113 tests**. Necesitan un Postgres local:
+Hay **123 tests**. Necesitan un Postgres local:
 
 ```bash
 npm test
@@ -303,7 +314,7 @@ lib/
   db.ts                     Conexión a Postgres
   auth.ts                   Sesión del tablero
 db/schema.sql               Las tablas y las migraciones
-tests/                      113 tests
+tests/                      123 tests
 vercel.json                 El horario del cron
 ```
 

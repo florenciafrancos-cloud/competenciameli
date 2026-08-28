@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { sql } from "@/lib/db";
+import { ensureSchema } from "@/lib/ensure-schema";
 import type { ListingRow } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -14,6 +15,7 @@ export const dynamic = "force-dynamic";
  *   ?limit=200
  */
 export async function GET(req: Request) {
+  await ensureSchema((t, p) => sql.query(t, p ?? []));
   const { searchParams } = new URL(req.url);
   const brand = searchParams.get("brand");
   const seller = searchParams.get("seller");

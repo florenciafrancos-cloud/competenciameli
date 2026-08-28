@@ -1,11 +1,13 @@
 import { NextResponse } from "next/server";
 import { sql } from "@/lib/db";
+import { ensureSchema } from "@/lib/ensure-schema";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 /** GET /api/stats -> numeros de cabecera del dashboard */
 export async function GET() {
+  await ensureSchema((t, p) => sql.query(t, p ?? []));
   try {
     const [totals, byBrand, lastRun, recent] = await Promise.all([
       sql`

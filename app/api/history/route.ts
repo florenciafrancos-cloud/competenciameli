@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { sql } from "@/lib/db";
+import { ensureSchema } from "@/lib/ensure-schema";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -9,6 +10,7 @@ export const dynamic = "force-dynamic";
  * Devuelve la serie de precios de una publicacion, para el grafico.
  */
 export async function GET(req: Request) {
+  await ensureSchema((t, p) => sql.query(t, p ?? []));
   const { searchParams } = new URL(req.url);
   const mlId = searchParams.get("ml_id");
   if (!mlId) {

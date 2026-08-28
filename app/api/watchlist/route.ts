@@ -1,6 +1,12 @@
 import { NextResponse } from "next/server";
 import { sql } from "@/lib/db";
-import { getAccessToken, parseMlLink, previewItem } from "@/lib/ml-api";
+import { ensureSchema } from "@/lib/ensure-schema";
+import {
+  getAccessToken,
+  parseMlLink,
+  previewItem,
+  resolveUserProduct,
+} from "@/lib/ml-api";
 import type { Query } from "@/lib/ingest-core";
 
 export const runtime = "nodejs";
@@ -14,6 +20,7 @@ const query: Query = (text, params) => sql.query(text, params ?? []);
  * Lista las publicaciones que se están siguiendo, con su último dato.
  */
 export async function GET() {
+  await ensureSchema((t, p) => sql.query(t, p ?? []));
   try {
     const res = await sql.query(
       `SELECT w.id, w.kind, w.value, w.label, w.notes, w.ml_id, w.active,
@@ -43,6 +50,7 @@ export async function GET() {
  * siguiente cuando la corrida no encuentra nada.
  */
 export async function POST(req: Request) {
+  await ensureSchema((t, p) => sql.query(t, p ?? []));
   let body: any;
   try {
     body = await req.json();
@@ -79,21 +87,46 @@ export async function POST(req: Request) {
   }
 
   try {
+    const token = await getAccessToken(query);
+
+    // Los links /up/MLAU... no traen el ID de catálogo: hay que resolverlo.
+    let effectiveId = mlId;
+    let effectiveKind = parsed.kind;
+
+    if (parsed.kind === "user_product") {
+      const resolved = await resolveUserProduct(mlId, raw, token);
+      if (!resolved.ok) {
+        return NextResponse.json(
+          {
+            error: resolved.error,
+            candidates: resolved.candidates,
+          },
+          { status: 400 }
+        );
+      }
+      effectiveId = resolved.productId;
+      effectiveKind = "product";
+    }
+
     // ¿Ya la estábamos siguiendo?
     const dup = await query(
       `SELECT id, active FROM watchlist WHERE ml_id = $1 LIMIT 1`,
-      [mlId]
+      [effectiveId]
     );
     if (dup.rows.length > 0 && dup.rows[0].active) {
       return NextResponse.json(
-        { error: `Esa publicación (${mlId}) ya está en la lista.` },
+        { error: `Ese producto (${effectiveId}) ya está en la lista.` },
         { status: 409 }
       );
     }
 
     // Verificamos contra Mercado Libre antes de guardar.
-    const token = await getAccessToken(query);
-    const preview = await previewItem(mlId, token, parsed.kind, raw);
+    const preview = await previewItem(
+      effectiveId,
+      token,
+      effectiveKind === "user_product" ? "product" : effectiveKind,
+      raw
+    );
     if (!preview.ok) {
       return NextResponse.json({ error: preview.error }, { status: 400 });
     }
@@ -113,7 +146,7 @@ export async function POST(req: Request) {
         l.url ?? raw,
         String(body?.label ?? l.title).slice(0, 300),
         body?.notes ?? null,
-        mlId,
+        effectiveId,
         // previewItem puede resolver como ficha de catalogo algo que el
         // link parecia publicacion: se guarda lo que realmente funciono.
         preview.kind,
@@ -125,9 +158,9 @@ export async function POST(req: Request) {
     const { runIngest } = await import("@/lib/ingest-core");
     await runIngest(
       {
-        run_id: `alta ${mlId} ${new Date().toISOString().slice(0, 16).replace("T", " ")}`,
+        run_id: `alta ${effectiveId} ${new Date().toISOString().slice(0, 16).replace("T", " ")}`,
         source: "alta-manual",
-        tracked_ids: [mlId],
+        tracked_ids: [effectiveId],
         listings: [l],
       },
       query
@@ -135,7 +168,7 @@ export async function POST(req: Request) {
 
     return NextResponse.json({
       ok: true,
-      ml_id: mlId,
+      ml_id: effectiveId,
       kind: preview.kind,
       listing: {
         title: l.title,
@@ -158,6 +191,7 @@ export async function POST(req: Request) {
 
 /** DELETE /api/watchlist?id=3  -> deja de seguirla (conserva el historial) */
 export async function DELETE(req: Request) {
+  await ensureSchema((t, p) => sql.query(t, p ?? []));
   const id = new URL(req.url).searchParams.get("id");
   if (!id) return NextResponse.json({ error: "falta id" }, { status: 400 });
   try {

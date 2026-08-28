@@ -207,7 +207,7 @@ function requireEnv(name: string): string {
  * avisa cuando cambia el precio y tambien cuando cambia QUE VENDEDOR esta
  * ganando la venta.
  */
-export type MlLinkKind = "item" | "product";
+export type MlLinkKind = "item" | "product" | "user_product";
 
 export type ParsedMlLink = {
   id: string;
@@ -246,8 +246,9 @@ export function parseMlLink(input: string): ParsedMlLink | null {
   const direct = text.match(/^(ML[A-Z])(U?)-?(\d{4,})$/i);
   if (direct) {
     const prefix = direct[1].toUpperCase();
-    // MLAU = user product: no es consultable por si mismo.
-    if (direct[2]) return null;
+    if (direct[2]) {
+      return { id: `${prefix}U${direct[3]}`, kind: "user_product" };
+    }
     return { id: `${prefix}${direct[3]}`, kind: "item" };
   }
 
@@ -278,8 +279,14 @@ export function parseMlLink(input: string): ParsedMlLink | null {
     return { id: `${item[1].toUpperCase()}${item[2]}`, kind: "item" };
   }
 
-  // Un /up/ sin product_trigger_id no se puede resolver: hay que pedir otro link.
-  if (/\/up\/ML[A-Z]U/i.test(text)) return null;
+  // Un /up/MLAU... sin product_trigger_id: el ID no es consultable directo,
+  // pero se puede resolver buscando el producto en el catalogo por el
+  // nombre que viene en la propia URL. Se marca como user_product para que
+  // quien lo consuma sepa que necesita ese paso extra.
+  const up = text.match(/\/up\/(ML[A-Z]U)(\d{4,})/i);
+  if (up) {
+    return { id: `${up[1].toUpperCase()}${up[2]}`, kind: "user_product" };
+  }
 
   // Ultimo recurso: cualquier MLA con numeros suficientes.
   const loose = text.match(/(ML[A-Z])-?(\d{6,})/i);
@@ -863,4 +870,168 @@ export async function fetchCatalogProducts(
   }
 
   return { listings, notFound, warnings: [...warnings, ...globalWarnings] };
+}
+
+// ---------------------------------------------------------------
+// Links /up/MLAU... — resolver el producto de catálogo
+// ---------------------------------------------------------------
+
+/**
+ * Los links `/up/MLAU...` (sin product_trigger_id) traen un ID que Mercado
+ * Libre no deja consultar. Pero el nombre del producto viene en la propia
+ * URL, y `/products/search` SI funciona (verificado: 200 OK).
+ *
+ * Asi que se resuelve en tres intentos, del mas confiable al menos:
+ *   1. `/products/{MLAU...}` — por si acaso responde.
+ *   2. `/user-products/{MLAU...}` — puede traer el catalog_product_id.
+ *   3. Buscar en el catalogo con las palabras del slug de la URL.
+ *
+ * El paso 3 es una coincidencia por texto, asi que NO se elige a ciegas: si
+ * hay un candidato claramente mejor se usa, y si no se devuelven las
+ * opciones para que la persona elija. Adivinar mal significaria seguir el
+ * precio del producto equivocado sin que nadie se entere.
+ */
+
+export type CatalogCandidate = {
+  id: string;
+  name: string;
+  score: number;
+};
+
+export type ResolveResult =
+  | { ok: true; productId: string; via: string }
+  | { ok: false; candidates: CatalogCandidate[]; error: string };
+
+/**
+ * Los links de resultados de busqueda traen `pdp_filters=item_id:MLA...`,
+ * que identifica la oferta exacta que la persona estaba mirando.
+ *
+ * No se puede leer esa publicacion (ML devuelve 403 para las de otros
+ * vendedores), pero sirve para algo mejor: desambiguar. El producto de
+ * catalogo correcto es el UNICO cuya lista de ofertas la contiene. Asi se
+ * evita elegir el color equivocado entre variantes con nombre casi igual.
+ */
+export function hintedItemId(url: string): string | null {
+  // Puede venir literal (item_id:MLA...) o escapado (item_id%3AMLA...).
+  const m = url.match(/item_id(?::|%3A)(ML[A-Z]\d{6,})/i);
+  return m ? m[1].toUpperCase() : null;
+}
+
+/** Palabras utiles del slug de una URL de Mercado Libre. */
+export function slugWords(url: string): string[] {
+  const m = url.match(/mercadolibre\.com\.ar\/([^/?#]+)/i);
+  const slug = m?.[1] ?? "";
+  return slug
+    .split("-")
+    .map((w) => w.trim().toLowerCase())
+    .filter((w) => w.length > 1 && !/^\d+$/.test(w));
+}
+
+function scoreName(name: string, words: string[]): number {
+  const hay = name.toLowerCase();
+  if (words.length === 0) return 0;
+  const hits = words.filter((w) => hay.includes(w)).length;
+  return hits / words.length;
+}
+
+export async function resolveUserProduct(
+  userProductId: string,
+  url: string,
+  token: string
+): Promise<ResolveResult> {
+  // Intento 1: el ID tal cual.
+  const direct = await mlFetch(`/products/${userProductId}`, token);
+  if (direct.ok && direct.data?.id) {
+    return { ok: true, productId: String(direct.data.id), via: "/products" };
+  }
+
+  // Intento 2: endpoint de user products.
+  const up = await mlFetch(`/user-products/${userProductId}`, token);
+  if (up.ok && up.data) {
+    const catalogId =
+      up.data.catalog_product_id ?? up.data.product_id ?? up.data.id;
+    if (catalogId && String(catalogId).startsWith("ML")) {
+      const id = String(catalogId);
+      if (!id.includes("U")) {
+        return { ok: true, productId: id, via: "/user-products" };
+      }
+    }
+  }
+
+  // Intento 3: buscar en el catalogo por el nombre de la URL.
+  const words = slugWords(url);
+  if (words.length === 0) {
+    return {
+      ok: false,
+      candidates: [],
+      error:
+        `No pude resolver el producto de este link (${userProductId}) y la URL no ` +
+        `tiene un nombre del que buscarlo.`,
+    };
+  }
+
+  const q = encodeURIComponent(words.join(" "));
+  const search = await mlFetch(
+    `/products/search?status=active&site_id=MLA&q=${q}`,
+    token
+  );
+
+  if (!search.ok || !Array.isArray(search.data?.results)) {
+    return {
+      ok: false,
+      candidates: [],
+      error:
+        `No pude resolver el producto de este link. Mercado Libre no permite ` +
+        `consultar el ID ${userProductId} y la búsqueda en el catálogo respondió ` +
+        `${search.status}.`,
+    };
+  }
+
+  const candidates: CatalogCandidate[] = search.data.results
+    .filter((r: any) => r?.id && r?.name)
+    .map((r: any) => ({
+      id: String(r.id),
+      name: String(r.name),
+      score: scoreName(String(r.name), words),
+    }))
+    .sort((a: CatalogCandidate, b: CatalogCandidate) => b.score - a.score)
+    .slice(0, 6);
+
+  // Si la URL trae el item_id de la oferta que la persona estaba mirando,
+  // se usa para elegir con certeza: el producto correcto es el unico cuya
+  // lista de ofertas lo incluye.
+  const hint = hintedItemId(url);
+  if (hint) {
+    for (const c of candidates) {
+      const offers = await mlFetch(`/products/${c.id}/items`, token);
+      if (!offers.ok || !Array.isArray(offers.data?.results)) continue;
+      const match = offers.data.results.some(
+        (r: any) => String(r?.item_id ?? r?.id ?? "").toUpperCase() === hint
+      );
+      if (match) {
+        return { ok: true, productId: c.id, via: "item_id de la URL" };
+      }
+    }
+  }
+
+  const best = candidates[0];
+  const second = candidates[1];
+
+  // Se acepta automaticamente solo si el mejor es bueno Y claramente mejor
+  // que el siguiente. Si no, decide la persona.
+  if (best && best.score >= 0.7 && (!second || best.score - second.score >= 0.15)) {
+    return { ok: true, productId: best.id, via: "/products/search" };
+  }
+
+  return {
+    ok: false,
+    candidates,
+    error:
+      candidates.length > 0
+        ? `Ese link no trae el ID del producto de catálogo, así que lo busqué por el ` +
+          `nombre y encontré varias opciones parecidas. Elegí la correcta de la lista ` +
+          `y pegá su código, o abrí el producto desde el buscador de Mercado Libre ` +
+          `para obtener un link con /p/.`
+        : `No encontré el producto en el catálogo de Mercado Libre a partir de este link.`,
+  };
 }

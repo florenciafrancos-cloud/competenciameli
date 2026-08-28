@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { sql } from "@/lib/db";
+import { ensureSchema } from "@/lib/ensure-schema";
 import { runScan } from "@/lib/scan";
 import { sendAlertEmail } from "@/lib/notify";
 import type { Query } from "@/lib/ingest-core";
@@ -17,6 +18,7 @@ export const maxDuration = 300; // el relevamiento puede tardar
  * el INGEST_SECRET.
  */
 export async function GET(req: Request) {
+  await ensureSchema((t, p) => sql.query(t, p ?? []));
   const auth = req.headers.get("authorization") ?? "";
   const cronSecret = process.env.CRON_SECRET;
   const ingestSecret = process.env.INGEST_SECRET;

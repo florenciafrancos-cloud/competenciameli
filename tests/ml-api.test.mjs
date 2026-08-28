@@ -29,6 +29,9 @@ import {
   parseMlLink,
   fetchCatalogProduct,
   fetchCatalogProducts,
+  resolveUserProduct,
+  slugWords,
+  hintedItemId,
 } from "../lib/ml-api";
 import { runScan } from "../lib/scan";
 
@@ -90,6 +93,11 @@ const CATALOG = new Map();
 const CATALOG_OFFERS = new Map();
 /** Publicaciones de otros vendedores: ML las prohibe (403). */
 const FORBIDDEN_ITEMS = new Set();
+/** Resultados de /products/search. */
+const CATALOG_SEARCH = [];
+/** MLAU... -> catalog_product_id, si /user-products lo resolviera. */
+const USER_PRODUCTS = new Map();
+let userProductsMode = "forbidden";
 
 function putCatalog(id, over = {}) {
   // Forma REAL de /products/{id}, verificada el 28/08/2026:
@@ -215,6 +223,24 @@ const server = createServer((req, res) => {
     );
   }
 
+  // Busqueda en el catalogo de productos
+  if (url.pathname === "/products/search") {
+    const q = (url.searchParams.get("q") ?? "").toLowerCase();
+    const results = [...CATALOG_SEARCH].filter((r) =>
+      q.split(/\s+/).some((w) => w && r.name.toLowerCase().includes(w))
+    );
+    return json(200, { paging: { total: results.length }, results });
+  }
+
+  // User products (los IDs MLAU de los links /up/)
+  const upMatch = url.pathname.match(/^\/user-products\/(ML[A-Z]U\d+)$/);
+  if (upMatch) {
+    if (userProductsMode === "forbidden") return json(403, { message: "forbidden" });
+    const mapped = USER_PRODUCTS.get(upMatch[1]);
+    if (!mapped) return json(404, { error: "not_found" });
+    return json(200, { id: upMatch[1], catalog_product_id: mapped });
+  }
+
   // Ficha de catalogo
   const prodItemsMatch = url.pathname.match(/^\/products\/(ML[A-Z]\d+)\/items$/);
   if (prodItemsMatch) {
@@ -331,15 +357,20 @@ await test("en una pagina de catalogo se usa la ficha, NO el wid", () => {
   assert.deepEqual(r, { id: "MLA67012657", kind: "product" });
 });
 
-await test("un /up/ sin product_trigger_id no se puede resolver", () => {
-  assert.equal(
+await test("un /up/ sin product_trigger_id queda como user_product", () => {
+  // Antes devolvia null y la app decia "pegá otro link". Ahora se marca
+  // como user_product para poder resolverlo buscando en el catalogo.
+  assert.deepEqual(
     parseMlLink("https://www.mercadolibre.com.ar/termo/up/MLAU4195231986"),
-    null
+    { id: "MLAU4195231986", kind: "user_product" }
   );
 });
 
-await test("un ID MLAU pegado solo no es consultable", () => {
-  assert.equal(parseMlLink("MLAU4195231986"), null);
+await test("un ID MLAU pegado solo tambien queda como user_product", () => {
+  assert.deepEqual(parseMlLink("MLAU4195231986"), {
+    id: "MLAU4195231986",
+    kind: "user_product",
+  });
 });
 
 await test("no confunde el nombre del producto en la URL con un ID", () => {
@@ -609,6 +640,158 @@ await test("los avisos repetidos se reportan una sola vez", async () => {
   } finally {
     pricesForbidden = false;
   }
+});
+
+// ---------------------------------------------------------------
+console.log("\n== Links /up/MLAU... (sin product_trigger_id) ==");
+
+await test("reconoce un /up/MLAU como user_product, no como publicacion", () => {
+  const r = parseMlLink(
+    "https://www.mercadolibre.com.ar/botella-termica-contigo-473ml-acero-inoxidable-dualsip/up/MLAU1234567890"
+  );
+  assert.deepEqual(r, { id: "MLAU1234567890", kind: "user_product" });
+});
+
+await test("saca las palabras utiles del nombre en la URL", () => {
+  const w = slugWords(
+    "https://www.mercadolibre.com.ar/botella-termica-contigo-473ml-acero-inoxidable-dualsip/up/MLAU1"
+  );
+  assert.ok(w.includes("contigo"));
+  assert.ok(w.includes("dualsip"));
+  assert.ok(!w.includes("up"), "no deberia tomar el path");
+});
+
+await test("resuelve por /user-products cuando ML lo permite", async () => {
+  userProductsMode = "ok";
+  USER_PRODUCTS.set("MLAU1234567890", "MLA74954916");
+  try {
+    const r = await resolveUserProduct(
+      "MLAU1234567890",
+      "https://www.mercadolibre.com.ar/x/up/MLAU1234567890",
+      "T"
+    );
+    assert.equal(r.ok, true);
+    assert.equal(r.productId, "MLA74954916");
+    assert.equal(r.via, "/user-products");
+  } finally {
+    userProductsMode = "forbidden";
+    USER_PRODUCTS.clear();
+  }
+});
+
+await test("si no, busca en el catalogo y acepta un match claro", async () => {
+  CATALOG_SEARCH.length = 0;
+  CATALOG_SEARCH.push(
+    { id: "MLA88888888", name: "Botella Termica Contigo 473ml Acero Inoxidable DualSip" },
+    { id: "MLA77777777", name: "Mochila escolar azul" }
+  );
+  const r = await resolveUserProduct(
+    "MLAU9999999999",
+    "https://www.mercadolibre.com.ar/botella-termica-contigo-473ml-acero-inoxidable-dualsip/up/MLAU9999999999",
+    "T"
+  );
+  assert.equal(r.ok, true);
+  assert.equal(r.productId, "MLA88888888");
+  assert.equal(r.via, "/products/search");
+});
+
+await test("CRITICO: si hay dos candidatos parecidos, NO elige solo", async () => {
+  // Elegir mal significaria seguir el precio del producto equivocado sin
+  // que nadie se entere. Mejor que decida la persona.
+  CATALOG_SEARCH.length = 0;
+  CATALOG_SEARCH.push(
+    { id: "MLA11111111", name: "Botella Termica Contigo 473ml Acero Inoxidable DualSip Negro" },
+    { id: "MLA22222222", name: "Botella Termica Contigo 473ml Acero Inoxidable DualSip Blanco" }
+  );
+  const r = await resolveUserProduct(
+    "MLAU9999999999",
+    "https://www.mercadolibre.com.ar/botella-termica-contigo-473ml-acero-inoxidable-dualsip/up/MLAU9999999999",
+    "T"
+  );
+  assert.equal(r.ok, false);
+  assert.equal(r.candidates.length, 2);
+  assert.match(r.error, /Elegí la correcta/);
+});
+
+await test("devuelve las opciones ordenadas por parecido", async () => {
+  CATALOG_SEARCH.length = 0;
+  CATALOG_SEARCH.push(
+    { id: "MLA33333333", name: "Contigo algo distinto" },
+    { id: "MLA44444444", name: "Botella Termica Contigo 473ml Acero Inoxidable DualSip" }
+  );
+  const r = await resolveUserProduct(
+    "MLAU9999999999",
+    "https://www.mercadolibre.com.ar/botella-termica-contigo-473ml-acero-inoxidable-dualsip/up/MLAU9999999999",
+    "T"
+  );
+  // El mejor es claramente mejor -> se acepta
+  assert.equal(r.ok, true);
+  assert.equal(r.productId, "MLA44444444");
+});
+
+await test("extrae el item_id de pdp_filters (literal y escapado)", () => {
+  assert.equal(
+    hintedItemId(
+      "https://www.mercadolibre.com.ar/x/up/MLAU4148053079?pdp_filters=item_id:MLA3514608986#is_advertising=true"
+    ),
+    "MLA3514608986"
+  );
+  assert.equal(
+    hintedItemId("https://www.mercadolibre.com.ar/x/up/MLAU1?pdp_filters=item_id%3AMLA3514608986"),
+    "MLA3514608986"
+  );
+  assert.equal(hintedItemId("https://www.mercadolibre.com.ar/x/up/MLAU1"), null);
+});
+
+await test("con el item_id de la URL elige el producto correcto entre variantes", async () => {
+  // El caso real: dos colores con nombre casi igual. Sin el item_id habria
+  // que preguntarle a la persona; con el, se resuelve solo y sin riesgo.
+  CATALOG_SEARCH.length = 0;
+  CATALOG_SEARCH.push(
+    { id: "MLA55550001", name: "Botella Termica Contigo 473ml Acero Inoxidable Autoseal Negro" },
+    { id: "MLA55550002", name: "Botella Termica Contigo 473ml Acero Inoxidable Autoseal Blanco" }
+  );
+  putOffers("MLA55550001", [{ item_id: "MLA9999999999", seller_id: 1, price: 10000 }]);
+  putOffers("MLA55550002", [{ item_id: "MLA3514608986", seller_id: 2, price: 20000 }]);
+
+  const r = await resolveUserProduct(
+    "MLAU4148053079",
+    "https://www.mercadolibre.com.ar/botella-termica-contigo-473ml-acero-inoxidable-autoseal/up/MLAU4148053079?pdp_filters=item_id:MLA3514608986#is_advertising=true&position=1",
+    "T"
+  );
+  assert.equal(r.ok, true, "no resolvio con el item_id");
+  assert.equal(r.productId, "MLA55550002", "eligio la variante equivocada");
+  assert.match(r.via, /item_id/);
+});
+
+await test("si el item_id no aparece en ninguna, vuelve a preguntar", async () => {
+  CATALOG_SEARCH.length = 0;
+  CATALOG_SEARCH.push(
+    { id: "MLA55550001", name: "Botella Termica Contigo 473ml Acero Inoxidable Autoseal Negro" },
+    { id: "MLA55550002", name: "Botella Termica Contigo 473ml Acero Inoxidable Autoseal Blanco" }
+  );
+  putOffers("MLA55550001", [{ item_id: "MLA1111111111", seller_id: 1, price: 10000 }]);
+  putOffers("MLA55550002", [{ item_id: "MLA2222222222", seller_id: 2, price: 20000 }]);
+
+  const r = await resolveUserProduct(
+    "MLAU4148053079",
+    "https://www.mercadolibre.com.ar/botella-termica-contigo-473ml-acero-inoxidable-autoseal/up/MLAU4148053079?pdp_filters=item_id:MLA7777777777",
+    "T"
+  );
+  assert.equal(r.ok, false);
+  assert.equal(r.candidates.length, 2);
+});
+
+await test("si el catalogo no devuelve nada, lo dice sin inventar", async () => {
+  CATALOG_SEARCH.length = 0;
+  const r = await resolveUserProduct(
+    "MLAU9999999999",
+    "https://www.mercadolibre.com.ar/producto-inexistente-raro/up/MLAU9999999999",
+    "T"
+  );
+  assert.equal(r.ok, false);
+  assert.equal(r.candidates.length, 0);
+  assert.match(r.error, /No encontré el producto/);
 });
 
 // ---------------------------------------------------------------

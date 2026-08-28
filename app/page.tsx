@@ -298,7 +298,18 @@ export default function Home() {
       });
       const d = await res.json();
       if (!res.ok) {
-        setAddMsg({ ok: false, text: d.error ?? "No se pudo agregar." });
+        const cands = Array.isArray(d.candidates) ? d.candidates : [];
+        setAddMsg({
+          ok: false,
+          text:
+            (d.error ?? "No se pudo agregar.") +
+            (cands.length
+              ? "\n\nOpciones encontradas:\n" +
+                cands
+                  .map((c: any) => `· ${c.id} — ${c.name}`)
+                  .join("\n")
+              : ""),
+        });
       } else {
         setAddMsg({
           ok: true,
@@ -439,19 +450,19 @@ export default function Home() {
             Pegá el link de una publicación de la competencia en Mercado Libre.
             Todos los días se controla sola y te avisa por mail si cambia el
             precio, las cuotas, el vendedor, o si se pausa o se da de baja.
-            <strong>Usá el link de la ficha del producto</strong> — la URL que
-            tiene <code>/p/</code> o <code>/up/</code>. Además del precio te
-            muestra todas las ofertas que compiten, quién tiene el mejor precio,
-            y te avisa cuando entra o sale un competidor. Mercado Libre no
-            permite leer publicaciones sueltas de otros vendedores, así que ese
-            es el camino que funciona.
+            Buscá el producto en Mercado Libre, entrá al resultado, y pegá la
+            URL de la barra de direcciones tal cual está — con todo lo que
+            venga después del signo de pregunta. Sirven las URLs con{" "}
+            <code>/p/</code> y con <code>/up/</code>. Te muestra el mejor precio
+            del producto, quién lo tiene, cuántos vendedores compiten, y te
+            avisa cuando eso cambia.
           </p>
           <div className="flex gap-2 flex-wrap items-center text-[13px]">
             <input
               value={newLink}
               onChange={(e) => setNewLink(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && addLink()}
-              placeholder="https://articulo.mercadolibre.com.ar/MLA-..."
+              placeholder="Pegá acá la URL del producto en Mercado Libre"
               className="rounded-md border hairline bg-transparent px-3 py-2 w-full max-w-xl"
             />
             <button
@@ -463,7 +474,7 @@ export default function Home() {
             </button>
           </div>
           {addMsg && (
-            <p className={`text-[13px] mt-2 ${addMsg.ok ? "muted" : "text-up"}`}>
+            <p className={`text-[13px] mt-2 whitespace-pre-wrap ${addMsg.ok ? "muted" : "text-up"}`}>
               {addMsg.text}
             </p>
           )}
@@ -775,11 +786,10 @@ export default function Home() {
             instante contra ML, así sabés en el momento si el link está bien.
           </p>
           <p className="muted text-[12px] mb-4 max-w-2xl">
-            Pegá la URL de la <strong>ficha del producto</strong>: la que tiene{" "}
-            <code>/p/</code> o <code>/up/</code>. Sigue el mejor precio del
-            producto, quién lo tiene, y cuántos vendedores compiten. Los links de
-            publicaciones sueltas de otros vendedores no se pueden consultar:
-            Mercado Libre los bloquea.
+            Pegá la URL <strong>completa</strong>, tal como sale de la barra de
+            direcciones: lo que viene después del <code>?</code> ayuda a
+            identificar exactamente qué producto y qué variante estás mirando.
+            Sirven las URLs con <code>/p/</code> y con <code>/up/</code>.
           </p>
 
           <div className="flex gap-2 flex-wrap items-center mb-2 text-[13px]">
@@ -787,7 +797,7 @@ export default function Home() {
               value={newLink}
               onChange={(e) => setNewLink(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && addLink()}
-              placeholder="https://articulo.mercadolibre.com.ar/MLA-..."
+              placeholder="Pegá acá la URL del producto en Mercado Libre"
               className="rounded-md border hairline bg-transparent px-3 py-2 w-full max-w-xl"
             />
             <button
@@ -799,7 +809,7 @@ export default function Home() {
             </button>
           </div>
           {addMsg && (
-            <p className={`text-[13px] mb-4 ${addMsg.ok ? "muted" : "text-up"}`}>
+            <p className={`text-[13px] mb-4 whitespace-pre-wrap ${addMsg.ok ? "muted" : "text-up"}`}>
               {addMsg.text}
             </p>
           )}

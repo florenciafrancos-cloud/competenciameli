@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { sql } from "@/lib/db";
+import { ensureSchema } from "@/lib/ensure-schema";
 import { runScan } from "@/lib/scan";
 import { sendAlertEmail } from "@/lib/notify";
 import { isLoggedIn } from "@/lib/auth";
@@ -15,6 +16,7 @@ export const maxDuration = 300;
  * Protegido por la sesion del dashboard (no necesita secreto).
  */
 export async function POST() {
+  await ensureSchema((t, p) => sql.query(t, p ?? []));
   if (!(await isLoggedIn())) {
     return NextResponse.json({ error: "no autorizado" }, { status: 401 });
   }

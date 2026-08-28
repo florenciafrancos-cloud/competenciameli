@@ -55,9 +55,9 @@ export async function GET(req: Request) {
       ...summary,
       ok: true,
       run_id: report.run_id,
-      brands_scanned: report.brands_scanned,
-      sellers_scanned: report.sellers_scanned,
-      urls_scanned: report.urls_scanned,
+      tracked: report.tracked,
+      read_ok: report.read_ok,
+      not_found: report.not_found,
       warnings: report.warnings,
       email: mail,
     });

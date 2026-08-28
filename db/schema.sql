@@ -97,11 +97,8 @@ CREATE TABLE IF NOT EXISTS runs (
 
 CREATE INDEX IF NOT EXISTS runs_started_idx ON runs (started_at DESC);
 
--- Watchlist inicial: arrancamos con Bubba y Contigo.
-INSERT INTO watchlist (kind, value, label, notes) VALUES
-  ('brand', 'Bubba',   'Bubba',   'Marca competidora - termos y vasos termicos'),
-  ('brand', 'Contigo', 'Contigo', 'Marca competidora - termos y vasos termicos')
-ON CONFLICT (kind, value) DO NOTHING;
+-- No se precarga nada: el usuario agrega las publicaciones que quiere
+-- seguir pegando sus links en el dashboard.
 
 -- Tokens de la API de Mercado Libre. Una sola fila (id = 1).
 -- El refresh_token es de UN SOLO USO: cada refresco devuelve uno nuevo,
@@ -113,3 +110,32 @@ CREATE TABLE IF NOT EXISTS ml_tokens (
   expires_at    TIMESTAMPTZ NOT NULL,
   updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- ================================================================
+-- Migraciones incrementales
+-- Se agregan aca en vez de tocar los CREATE TABLE de arriba, para
+-- que una base ya creada tambien reciba las columnas nuevas.
+-- ================================================================
+
+-- Estado de la publicacion segun Mercado Libre (active | paused | closed)
+-- y stock disponible. Vienen del endpoint /items, que es el que la API
+-- si permite consultar.
+ALTER TABLE listings ADD COLUMN IF NOT EXISTS ml_status TEXT;
+ALTER TABLE listings ADD COLUMN IF NOT EXISTS available_quantity INT;
+ALTER TABLE listings ADD COLUMN IF NOT EXISTS seller_id BIGINT;
+ALTER TABLE listings ADD COLUMN IF NOT EXISTS added_note TEXT;
+
+ALTER TABLE price_snapshots ADD COLUMN IF NOT EXISTS ml_status TEXT;
+ALTER TABLE price_snapshots ADD COLUMN IF NOT EXISTS available_quantity INT;
+
+-- Para las entradas de tipo 'url' guardamos el ID ya extraido, asi no
+-- hay que volver a parsear la URL en cada corrida.
+ALTER TABLE watchlist ADD COLUMN IF NOT EXISTS ml_id TEXT;
+
+CREATE INDEX IF NOT EXISTS watchlist_ml_id_idx ON watchlist (ml_id);
+
+-- Mercado Libre cerro la busqueda publica de su API (403 para aplicaciones
+-- no certificadas, verificado el 28/08/2026), asi que las entradas de tipo
+-- marca o vendedor no se pueden relevar. Se desactivan para que no queden
+-- generando advertencias en cada corrida. El seguimiento es por link.
+UPDATE watchlist SET active = FALSE WHERE kind IN ('brand', 'seller');

@@ -1,16 +1,7 @@
-import { CHANGE_LABELS, type DetectedChange } from "./types";
+import { CHANGE_LABELS, CHANGE_ORDER, type DetectedChange } from "./types";
 
 /** Tipos de cambio que disparan email. El resto queda solo en el dashboard. */
-const ALERT_TYPES = new Set([
-  "price_up",
-  "price_down",
-  "new_listing",
-  "delisted",
-  "relisted",
-  "seller_change",
-  "installments_added",
-  "installments_removed",
-]);
+const ALERT_TYPES = new Set<string>(CHANGE_ORDER);
 
 function fmtMoney(v: string | null): string {
   if (!v) return "—";
@@ -34,9 +25,19 @@ function describe(c: DetectedChange): string {
     case "new_listing":
       return `Nueva, a ${fmtMoney(c.new_value)}`;
     case "delisted":
-      return `Ya no aparece (estaba a ${fmtMoney(c.old_value)})`;
+      return `Ya no existe (estaba a ${fmtMoney(c.old_value)})`;
     case "relisted":
-      return `Volvio, a ${fmtMoney(c.new_value)}`;
+      return `Volvió, a ${fmtMoney(c.new_value)}`;
+    case "reactivated":
+      return "Volvió a estar activa";
+    case "paused":
+      return c.new_value === "closed" ? "Cerrada por el vendedor" : "Pausada";
+    case "out_of_stock":
+      return "Se quedó sin stock";
+    case "back_in_stock":
+      return `Volvió a tener stock (${c.new_value})`;
+    case "installments_changed":
+      return `${c.old_value} → ${c.new_value}`;
     case "seller_change":
       return `${c.old_value} → ${c.new_value}`;
     default:
@@ -52,16 +53,7 @@ function buildHtml(changes: DetectedChange[], appUrl: string, runId: string): st
   }
 
   // Los cambios de precio primero, que son los que mas importan.
-  const order = [
-    "price_down",
-    "price_up",
-    "new_listing",
-    "delisted",
-    "relisted",
-    "seller_change",
-    "installments_added",
-    "installments_removed",
-  ];
+  const order: string[] = [...CHANGE_ORDER];
 
   const sections = order
     .filter((t) => byType.has(t))

@@ -1,32 +1,31 @@
 import type { Query } from "./ingest-core";
 import { runIngest, type IngestResult } from "./ingest-core";
-import { getAccessToken, scanBrand, scanSeller, fetchItems } from "./ml-api";
-import type { ScrapedListing } from "./types";
+import { getAccessToken, fetchItems, parseMlId } from "./ml-api";
+
+export { parseMlId };
 
 export type ScanReport = {
   run_id: string;
-  brands_scanned: string[];
-  sellers_scanned: string[];
-  urls_scanned: number;
+  tracked: number;
+  read_ok: number;
+  not_found: number;
   warnings: string[];
   ingest: IngestResult | null;
   error?: string;
 };
 
-/** Extrae el ID de publicacion (MLA...) de una URL de Mercado Libre. */
-export function mlIdFromUrl(url: string): string | null {
-  // Formatos: .../MLA-1234567890-titulo... o .../p/MLA1234567890
-  const m = url.match(/ML[A-Z]-?(\d{6,})/i);
-  if (!m) return null;
-  const prefix = url.match(/ML([A-Z])/i);
-  return `ML${(prefix?.[1] ?? "A").toUpperCase()}${m[1]}`;
-}
-
 /**
- * Corrida completa: lee el watchlist, releva todo en Mercado Libre,
- * y manda el resultado a la ingesta (que detecta los cambios).
+ * Corrida completa: lee los links que el usuario cargo, consulta cada
+ * publicacion en Mercado Libre, y manda el resultado a la ingesta (que
+ * detecta los cambios y guarda el historial).
  *
  * Es la funcion que llama el cron diario.
+ *
+ * Nota sobre marcas y vendedores: el watchlist admite entradas de tipo
+ * 'brand' y 'seller' por compatibilidad, pero Mercado Libre cerro la
+ * busqueda publica de su API (403), asi que no se pueden relevar. Si hay
+ * entradas de ese tipo activas, se avisa en las advertencias en vez de
+ * fallar en silencio.
  */
 export async function runScan(
   q: Query,
@@ -37,111 +36,84 @@ export async function runScan(
 
   const report: ScanReport = {
     run_id: runId,
-    brands_scanned: [],
-    sellers_scanned: [],
-    urls_scanned: 0,
+    tracked: 0,
+    read_ok: 0,
+    not_found: 0,
     warnings: [],
     ingest: null,
   };
 
-  // ---- 1. Qué monitorear ----
+  // ---- 1. Que seguir ----
   const wl = await q(
-    `SELECT kind, value FROM watchlist WHERE active = TRUE ORDER BY kind, value`
+    `SELECT kind, value, ml_id FROM watchlist WHERE active = TRUE ORDER BY id`
   );
-  if (wl.rows.length === 0) {
-    report.error = "El watchlist está vacío: no hay nada que monitorear.";
-    return report;
+
+  const trackedIds: string[] = [];
+  const unparsed: string[] = [];
+  let legacyCount = 0;
+
+  for (const row of wl.rows) {
+    if (row.kind === "url") {
+      const id = row.ml_id || parseMlId(row.value);
+      if (id) trackedIds.push(id.toUpperCase());
+      else unparsed.push(row.value);
+    } else {
+      legacyCount++;
+    }
   }
 
-  const brands = wl.rows.filter((r) => r.kind === "brand").map((r) => r.value);
-  const sellers = wl.rows.filter((r) => r.kind === "seller").map((r) => r.value);
-  const urls = wl.rows.filter((r) => r.kind === "url").map((r) => r.value);
+  if (legacyCount > 0) {
+    report.warnings.push(
+      `Hay ${legacyCount} entrada(s) de tipo marca o vendedor en la lista. ` +
+        `Mercado Libre cerró la búsqueda pública de su API, así que no se pueden ` +
+        `relevar: hay que seguir esas publicaciones por link. Se ignoran en esta corrida.`
+    );
+  }
+  if (unparsed.length > 0) {
+    report.warnings.push(
+      `No se pudo extraer el ID de ${unparsed.length} link(s): ${unparsed
+        .slice(0, 5)
+        .join(", ")}`
+    );
+  }
+
+  const unique = [...new Set(trackedIds)];
+  report.tracked = unique.length;
+
+  if (unique.length === 0) {
+    report.error =
+      "No hay publicaciones cargadas para seguir. Agregá links de Mercado Libre en la pestaña “Qué se monitorea”.";
+    return report;
+  }
 
   // ---- 2. Token ----
   const token = await getAccessToken(q);
 
-  // ---- 3. Relevar ----
-  const all: ScrapedListing[] = [];
-  // Solo las marcas que se relevaron SIN error entran en brands_covered.
-  // Si una marca falla y la incluyeramos, la ingesta marcaria como dadas
-  // de baja todas sus publicaciones. Ese es el bug mas caro posible aca.
-  const covered: string[] = [];
+  // ---- 3. Consultar Mercado Libre ----
+  const { listings, notFound, warnings } = await fetchItems(unique, token);
+  report.warnings.push(...warnings);
+  report.read_ok = listings.length;
+  report.not_found = notFound.length;
 
-  for (const brand of brands) {
-    try {
-      const res = await scanBrand(brand, token);
-      report.warnings.push(...res.warnings.map((w) => `[${brand}] ${w}`));
-      if (res.listings.length > 0) {
-        all.push(...res.listings);
-        covered.push(brand);
-        report.brands_scanned.push(brand);
-      } else {
-        report.warnings.push(
-          `[${brand}] No se obtuvo ninguna publicación; se excluye de la detección de bajas para no marcar bajas falsas.`
-        );
-      }
-    } catch (err) {
-      report.warnings.push(
-        `[${brand}] Falló el relevamiento: ${
-          err instanceof Error ? err.message : String(err)
-        }. Se excluye de la detección de bajas.`
-      );
-    }
-  }
-
-  for (const seller of sellers) {
-    try {
-      const res = await scanSeller(seller, token);
-      report.warnings.push(...res.warnings.map((w) => `[${seller}] ${w}`));
-      if (res.listings.length > 0) {
-        all.push(...res.listings);
-        report.sellers_scanned.push(seller);
-      }
-    } catch (err) {
-      report.warnings.push(
-        `[vendedor ${seller}] Falló: ${
-          err instanceof Error ? err.message : String(err)
-        }`
-      );
-    }
-  }
-
-  if (urls.length > 0) {
-    const ids = urls.map(mlIdFromUrl).filter((x): x is string => !!x);
-    const bad = urls.length - ids.length;
-    if (bad > 0) {
-      report.warnings.push(
-        `${bad} URL(s) del watchlist no tienen un ID de publicación reconocible.`
-      );
-    }
-    if (ids.length > 0) {
-      try {
-        const items = await fetchItems(ids, token);
-        all.push(...items);
-        report.urls_scanned = items.length;
-      } catch (err) {
-        report.warnings.push(
-          `Falló la lectura de publicaciones puntuales: ${
-            err instanceof Error ? err.message : String(err)
-          }`
-        );
-      }
-    }
-  }
-
-  if (all.length === 0) {
+  // Si no se leyo NADA y tampoco hubo 404s, algo falló: no tocamos la base.
+  if (listings.length === 0 && notFound.length === 0) {
     report.error =
-      "No se obtuvo ninguna publicación de Mercado Libre en esta corrida. No se modificó nada en la base.";
+      "No se pudo leer ninguna publicación de Mercado Libre en esta corrida. No se modificó nada en la base.";
     return report;
   }
+
+  // Solo se consideran "consultados" los IDs de los que efectivamente
+  // tuvimos una respuesta (dato o 404). Si una publicacion no respondio,
+  // queda afuera y no se marca de baja.
+  const answered = [...listings.map((l) => l.ml_id), ...notFound];
 
   // ---- 4. Ingesta ----
   report.ingest = await runIngest(
     {
       run_id: runId,
       source: opts.source ?? "ml-api-cron",
-      brands_covered: covered.length > 0 ? covered : report.sellers_scanned,
-      listings: all,
+      tracked_ids: answered,
+      listings,
       notes: report.warnings.length ? report.warnings.join(" | ") : undefined,
     },
     q
@@ -149,3 +121,6 @@ export async function runScan(
 
   return report;
 }
+
+/** Compatibilidad: antes se exportaba con este nombre. */
+export const mlIdFromUrl = parseMlId;

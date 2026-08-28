@@ -96,6 +96,9 @@ export function normalizeListings(raw: unknown[]): {
         ? String(r.installments_text).trim()
         : null,
       currency: r.currency ?? "ARS",
+      seller_id: numOrNull(r.seller_id),
+      ml_status: r.ml_status ? String(r.ml_status).trim() : null,
+      available_quantity: numOrNull(r.available_quantity),
     });
   }
 
@@ -106,6 +109,7 @@ export function normalizeListings(raw: unknown[]): {
 export function validatePayload(body: IngestPayload): {
   runId: string;
   brandsCovered: string[];
+  trackedIds: string[];
 } {
   const runId = String(body?.run_id ?? "").trim();
   if (!runId) throw new IngestError("falta run_id");
@@ -113,20 +117,25 @@ export function validatePayload(body: IngestPayload): {
   if (!Array.isArray(body?.listings)) {
     throw new IngestError("listings debe ser un array");
   }
-  if (!Array.isArray(body?.brands_covered) || body.brands_covered.length === 0) {
+
+  const brandsCovered = (body.brands_covered ?? [])
+    .map((b) => String(b).trim())
+    .filter(Boolean);
+
+  const trackedIds = (body.tracked_ids ?? [])
+    .map((id) => String(id).trim().toUpperCase())
+    .filter(Boolean);
+
+  // Hace falta al menos uno de los dos: son los que definen de que
+  // publicaciones se puede inferir una baja. Sin ninguno, una corrida
+  // vacia no debe borrar nada.
+  if (brandsCovered.length === 0 && trackedIds.length === 0) {
     throw new IngestError(
-      "brands_covered es obligatorio y no puede estar vacio: define de que marcas se pueden marcar bajas"
+      "hace falta tracked_ids (los IDs consultados) o brands_covered: son los que definen de que publicaciones se puede inferir una baja"
     );
   }
 
-  const brandsCovered = body.brands_covered
-    .map((b) => String(b).trim())
-    .filter(Boolean);
-  if (brandsCovered.length === 0) {
-    throw new IngestError("brands_covered no puede tener solo valores vacios");
-  }
-
-  return { runId, brandsCovered };
+  return { runId, brandsCovered, trackedIds };
 }
 
 /**
@@ -137,7 +146,7 @@ export async function runIngest(
   body: IngestPayload,
   q: Query
 ): Promise<IngestResult> {
-  const { runId, brandsCovered } = validatePayload(body);
+  const { runId, brandsCovered, trackedIds } = validatePayload(body);
   const { listings, skipped } = normalizeListings(body.listings);
 
   try {
@@ -166,21 +175,38 @@ export async function runIngest(
     // (b) cualquier publicacion del snapshot, aunque este guardada
     //     bajo otra marca
     const lowerBrands = brandsCovered.map((b) => b.toLowerCase());
-    const scrapedIds = listings.map((l) => l.ml_id);
-    const params: unknown[] = [...lowerBrands, ...scrapedIds];
-    const idClause = scrapedIds.length
-      ? ` OR ml_id IN (${ph(scrapedIds.length, lowerBrands.length)})`
-      : "";
+    // Los IDs que nos interesan: los consultados explicitamente y los que
+    // vinieron en el snapshot.
+    const relevantIds = [
+      ...new Set([...trackedIds, ...listings.map((l) => l.ml_id)]),
+    ];
 
-    const existingRes = await q(
-      `SELECT * FROM listings
-       WHERE LOWER(COALESCE(brand, '')) IN (${ph(lowerBrands.length)})${idClause}`,
-      params
-    );
-    const existing = existingRes.rows as ListingRow[];
+    const clauses: string[] = [];
+    const params: unknown[] = [];
+    if (lowerBrands.length > 0) {
+      clauses.push(`LOWER(COALESCE(brand, '')) IN (${ph(lowerBrands.length)})`);
+      params.push(...lowerBrands);
+    }
+    if (relevantIds.length > 0) {
+      clauses.push(`ml_id IN (${ph(relevantIds.length, params.length)})`);
+      params.push(...relevantIds);
+    }
+
+    const existing: ListingRow[] =
+      clauses.length === 0
+        ? []
+        : ((
+            await q(
+              `SELECT * FROM listings WHERE ${clauses.join(" OR ")}`,
+              params
+            )
+          ).rows as ListingRow[]);
 
     // ---- 3. Detectar cambios ----
-    const changes = detectChanges(listings, existing, brandsCovered);
+    const changes = detectChanges(listings, existing, {
+      brandsCovered,
+      trackedIds,
+    });
 
     // ---- 4. Guardar publicaciones + snapshot de precio ----
     for (const l of listings) {
@@ -188,8 +214,10 @@ export async function runIngest(
         `INSERT INTO listings (
            ml_id, title, brand, url, seller, official_store,
            list_price, price, discount_pct, has_installments,
-           installments_text, currency, status, last_seen_at, updated_at
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'active',NOW(),NOW())
+           installments_text, currency, seller_id, ml_status,
+           available_quantity, status, last_seen_at, updated_at
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,
+                   'active',NOW(),NOW())
          ON CONFLICT (ml_id) DO UPDATE SET
            title             = EXCLUDED.title,
            brand             = COALESCE(NULLIF(EXCLUDED.brand, ''), listings.brand),
@@ -199,9 +227,14 @@ export async function runIngest(
            list_price        = EXCLUDED.list_price,
            price             = EXCLUDED.price,
            discount_pct      = EXCLUDED.discount_pct,
-           has_installments  = EXCLUDED.has_installments,
-           installments_text = EXCLUDED.installments_text,
+           -- Si esta corrida no pudo averiguar las cuotas (null), se
+           -- conserva lo que ya sabiamos en vez de borrarlo.
+           has_installments  = COALESCE(EXCLUDED.has_installments, listings.has_installments),
+           installments_text = COALESCE(EXCLUDED.installments_text, listings.installments_text),
            currency          = EXCLUDED.currency,
+           seller_id         = COALESCE(EXCLUDED.seller_id, listings.seller_id),
+           ml_status         = COALESCE(EXCLUDED.ml_status, listings.ml_status),
+           available_quantity = COALESCE(EXCLUDED.available_quantity, listings.available_quantity),
            status            = 'active',
            last_seen_at      = NOW(),
            updated_at        = NOW()`,
@@ -218,14 +251,17 @@ export async function runIngest(
           l.has_installments,
           l.installments_text,
           l.currency,
+          l.seller_id ?? null,
+          l.ml_status ?? null,
+          l.available_quantity ?? null,
         ]
       );
 
       await q(
         `INSERT INTO price_snapshots (
            ml_id, run_id, list_price, price, discount_pct,
-           seller, has_installments, status
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7,'active')`,
+           seller, has_installments, status, ml_status, available_quantity
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,'active',$8,$9)`,
         [
           l.ml_id,
           runId,
@@ -234,6 +270,8 @@ export async function runIngest(
           l.discount_pct,
           l.seller,
           l.has_installments,
+          l.ml_status ?? null,
+          l.available_quantity ?? null,
         ]
       );
     }

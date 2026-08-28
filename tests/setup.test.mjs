@@ -172,9 +172,30 @@ await test("quedaron creadas las 6 tablas que la app necesita", async () => {
   assert.deepEqual(res.rows.map((r) => r.table_name), expected);
 });
 
-await test("el watchlist inicial quedo cargado", async () => {
-  const res = await client.query(`SELECT value FROM watchlist ORDER BY value`);
-  assert.deepEqual(res.rows.map((r) => r.value), ["Bubba", "Contigo"]);
+await test("el watchlist arranca vacio", async () => {
+  // Ya no se precarga nada: el usuario agrega los links que quiere seguir.
+  const res = await client.query(`SELECT COUNT(*)::int AS n FROM watchlist`);
+  assert.equal(res.rows[0].n, 0);
+});
+
+await test("las columnas que agregan las migraciones existen", async () => {
+  const res = await client.query(
+    `SELECT table_name, column_name FROM information_schema.columns
+     WHERE table_schema = 'public'
+       AND ((table_name = 'listings' AND column_name IN ('ml_status','available_quantity','seller_id'))
+         OR (table_name = 'price_snapshots' AND column_name IN ('ml_status','available_quantity'))
+         OR (table_name = 'watchlist' AND column_name = 'ml_id'))`
+  );
+  assert.equal(res.rows.length, 6, `faltan columnas: encontradas ${res.rows.length}/6`);
+});
+
+await test("las migraciones son idempotentes (ADD COLUMN IF NOT EXISTS)", async () => {
+  for (const stmt of statements) await client.query(stmt);
+  const res = await client.query(
+    `SELECT COUNT(*)::int AS n FROM information_schema.columns
+     WHERE table_schema='public' AND table_name='listings' AND column_name='ml_status'`
+  );
+  assert.equal(res.rows[0].n, 1);
 });
 
 await test("los indices quedaron creados", async () => {
@@ -192,10 +213,17 @@ await test("los indices quedaron creados", async () => {
   }
 });
 
-await test("correrlo dos veces no rompe ni duplica datos", async () => {
+await test("correrlo dos veces no borra los links que el usuario cargo", async () => {
+  await client.query(
+    `INSERT INTO watchlist (kind, value, label, ml_id, active)
+     VALUES ('url', 'https://articulo.mercadolibre.com.ar/MLA-1234567890-x', 'Un termo', 'MLA1234567890', TRUE)`
+  );
   for (const stmt of statements) await client.query(stmt);
-  const res = await client.query(`SELECT COUNT(*)::int AS n FROM watchlist`);
-  assert.equal(res.rows[0].n, 2, "el INSERT inicial se duplico");
+  const res = await client.query(
+    `SELECT active FROM watchlist WHERE ml_id = 'MLA1234567890'`
+  );
+  assert.equal(res.rows.length, 1, "se borro la entrada del usuario");
+  assert.equal(res.rows[0].active, true, "se desactivo una entrada de tipo url");
 });
 
 await test("la restriccion de una sola fila de tokens sobrevive", async () => {

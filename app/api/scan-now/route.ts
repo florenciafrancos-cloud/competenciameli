@@ -38,7 +38,9 @@ export async function POST() {
       ...summary,
       ok: true,
       warnings: report.warnings,
-      brands_scanned: report.brands_scanned,
+      tracked: report.tracked,
+      read_ok: report.read_ok,
+      not_found: report.not_found,
       email: mail,
     });
   } catch (err) {

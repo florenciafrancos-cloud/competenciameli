@@ -17,7 +17,7 @@ export async function GET(req: Request) {
   const { searchParams } = new URL(req.url);
   const brand = searchParams.get("brand");
   const seller = searchParams.get("seller");
-  const status = searchParams.get("status") ?? "active";
+  const status = searchParams.get("status") ?? "all";
   const q = searchParams.get("q");
   const limit = Math.min(Number(searchParams.get("limit") ?? 500) || 500, 2000);
 

@@ -46,15 +46,15 @@ const q = (text, params = []) => client.query(text, params);
 // Setup: schema limpio
 // ---------------------------------------------------------------
 console.log("\n== Setup ==");
-await q(`DROP TABLE IF EXISTS price_snapshots, changes, listings, runs, watchlist CASCADE`);
+await q(`DROP TABLE IF EXISTS price_snapshots, changes, listings, runs, watchlist, ml_tokens CASCADE`);
 const schema = readFileSync(join(__dirname, "..", "db", "schema.sql"), "utf8");
 await q(schema);
 console.log("  ok  schema.sql se ejecuta sin errores");
 passed++;
 
-const wl = await q(`SELECT value FROM watchlist ORDER BY value`);
-assert.deepEqual(wl.rows.map((r) => r.value), ["Bubba", "Contigo"]);
-console.log("  ok  watchlist inicial cargada (Bubba, Contigo)");
+const wl = await q(`SELECT COUNT(*)::int AS n FROM watchlist`);
+assert.equal(wl.rows[0].n, 0);
+console.log("  ok  watchlist arranca vacia (el usuario agrega sus links)");
 passed++;
 
 // ---------------------------------------------------------------
@@ -105,16 +105,28 @@ console.log("\n== Validacion ==");
 
 await test("rechaza payload sin run_id", () => {
   assert.throws(
-    () => validatePayload({ listings: [], brands_covered: ["Bubba"] }),
+    () => validatePayload({ listings: [], tracked_ids: ["MLA1"] }),
     IngestError
   );
 });
 
-await test("rechaza brands_covered vacio (evita marcar bajas falsas)", () => {
+await test("rechaza payload sin tracked_ids ni brands_covered", () => {
+  // Sin ninguno de los dos no hay forma de saber de que publicaciones se
+  // puede inferir una baja: una corrida vacia no debe borrar nada.
   assert.throws(
-    () => validatePayload({ run_id: "r1", listings: [], brands_covered: [] }),
+    () => validatePayload({ run_id: "r1", listings: [] }),
     IngestError
   );
+});
+
+await test("acepta solo tracked_ids (modo por link, el que usamos)", () => {
+  const v = validatePayload({
+    run_id: "r1",
+    listings: [],
+    tracked_ids: ["mla123456"],
+  });
+  assert.deepEqual(v.trackedIds, ["MLA123456"]);
+  assert.deepEqual(v.brandsCovered, []);
 });
 
 // ---------------------------------------------------------------
@@ -128,7 +140,7 @@ await test("NO marca bajas de marcas que no se relevaron", () => {
     { ml_id: "MLA2", title: "Contigo y", brand: "Contigo", price: "200", status: "active", seller: "S", has_installments: false, url: null },
   ];
   // Solo se relevo Bubba, y MLA1 no aparecio -> baja de MLA1 unicamente.
-  const changes = detectChanges([], existing, ["Bubba"]);
+  const changes = detectChanges([], existing, { brandsCovered: ["Bubba"] });
   const delisted = changes.filter((c) => c.change_type === "delisted");
   assert.equal(delisted.length, 1);
   assert.equal(delisted[0].ml_id, "MLA1");
@@ -141,7 +153,7 @@ await test("ignora variaciones de centavos", () => {
   const changes = detectChanges(
     [{ ml_id: "MLA1", title: "x", brand: "Bubba", price: 1000.4, seller: "S", has_installments: false }],
     existing,
-    ["Bubba"]
+    { brandsCovered: ["Bubba"] }
   );
   assert.equal(changes.filter((c) => c.change_type.startsWith("price_")).length, 0);
 });
@@ -153,7 +165,7 @@ await test("calcula el porcentaje de cambio de precio", () => {
   const changes = detectChanges(
     [{ ml_id: "MLA1", title: "x", brand: "Bubba", price: 1200, seller: "S", has_installments: false }],
     existing,
-    ["Bubba"]
+    { brandsCovered: ["Bubba"] }
   );
   const c = changes.find((x) => x.change_type === "price_up");
   assert.equal(c.delta_abs, 200);
@@ -167,7 +179,7 @@ await test("detecta baja de precio", () => {
   const changes = detectChanges(
     [{ ml_id: "MLA1", title: "x", brand: "Bubba", price: 750, seller: "S", has_installments: false }],
     existing,
-    ["Bubba"]
+    { brandsCovered: ["Bubba"] }
   );
   const c = changes.find((x) => x.change_type === "price_down");
   assert.equal(c.delta_abs, -250);
@@ -181,7 +193,7 @@ await test("no inventa cambio de vendedor cuando el scraper no lo trae", () => {
   const changes = detectChanges(
     [{ ml_id: "MLA1", title: "x", brand: "Bubba", price: 1000, seller: null, has_installments: false }],
     existing,
-    ["Bubba"]
+    { brandsCovered: ["Bubba"] }
   );
   assert.equal(changes.filter((c) => c.change_type === "seller_change").length, 0);
 });
@@ -212,7 +224,7 @@ await test("primera corrida: todo es nuevo y first_run=true", async () => {
     {
       run_id: "run-1",
       source: "test",
-      brands_covered: ["Bubba", "Contigo"],
+      tracked_ids: ["MLA100", "MLA200"],
       listings: [
         L(),
         L({ ml_id: "MLA200", title: "Vaso Contigo Autoseal 470ml", brand: "Contigo", price: 25000, list_price: null, discount_pct: null, has_installments: false, installments_text: null }),
@@ -238,9 +250,8 @@ await test("guarda el snapshot de precio (historial)", async () => {
   assert.equal(res.rows[0].n, 2);
 });
 
-await test("registra la corrida con brands_covered como array", async () => {
-  const res = await q(`SELECT brands_covered, listings_seen, changes_found, status FROM runs WHERE id = 'run-1'`);
-  assert.deepEqual(res.rows[0].brands_covered, ["Bubba", "Contigo"]);
+await test("registra la corrida con su resumen", async () => {
+  const res = await q(`SELECT listings_seen, changes_found, status FROM runs WHERE id = 'run-1'`);
   assert.equal(res.rows[0].listings_seen, 2);
   assert.equal(res.rows[0].changes_found, 2);
   assert.equal(res.rows[0].status, "ok");
@@ -251,7 +262,7 @@ await test("segunda corrida: detecta suba de precio y cambio de vendedor", async
     {
       run_id: "run-2",
       source: "test",
-      brands_covered: ["Bubba", "Contigo"],
+      tracked_ids: ["MLA100", "MLA200"],
       listings: [
         L({ price: 46000, seller: "CHARCO" }),
         L({ ml_id: "MLA200", title: "Vaso Contigo Autoseal 470ml", brand: "Contigo", price: 25000, list_price: null, discount_pct: null, has_installments: false, installments_text: null }),
@@ -280,7 +291,7 @@ await test("tercera corrida: MLA100 desaparece -> se marca de baja", async () =>
   const r3 = await runIngest(
     {
       run_id: "run-3",
-      brands_covered: ["Bubba", "Contigo"],
+      tracked_ids: ["MLA100", "MLA200"],
       listings: [
         L({ ml_id: "MLA200", title: "Vaso Contigo Autoseal 470ml", brand: "Contigo", price: 25000, list_price: null, discount_pct: null, has_installments: false, installments_text: null }),
       ],
@@ -292,11 +303,11 @@ await test("tercera corrida: MLA100 desaparece -> se marca de baja", async () =>
   assert.equal(res.rows[0].status, "delisted");
 });
 
-await test("si solo se releva Contigo, la baja de Bubba NO se repite", async () => {
+await test("si solo se consulta MLA200, la baja de MLA100 NO se repite", async () => {
   const r4 = await runIngest(
     {
       run_id: "run-4",
-      brands_covered: ["Contigo"],
+      tracked_ids: ["MLA200"],
       listings: [
         L({ ml_id: "MLA200", title: "Vaso Contigo Autoseal 470ml", brand: "Contigo", price: 25000, list_price: null, discount_pct: null, has_installments: false, installments_text: null }),
       ],
@@ -310,7 +321,7 @@ await test("cuarta corrida: MLA100 reaparece -> relisted", async () => {
   const r5 = await runIngest(
     {
       run_id: "run-5",
-      brands_covered: ["Bubba", "Contigo"],
+      tracked_ids: ["MLA100", "MLA200"],
       listings: [
         L({ price: 42000, seller: "CHARCO" }),
         L({ ml_id: "MLA200", title: "Vaso Contigo Autoseal 470ml", brand: "Contigo", price: 25000, list_price: null, discount_pct: null, has_installments: false, installments_text: null }),
@@ -328,7 +339,7 @@ await test("detecta que dejo de ofrecer cuotas", async () => {
   const r6 = await runIngest(
     {
       run_id: "run-6",
-      brands_covered: ["Bubba"],
+      tracked_ids: ["MLA100"],
       listings: [L({ price: 42000, seller: "CHARCO", has_installments: false, installments_text: null })],
     },
     q
@@ -341,7 +352,7 @@ await test("reenviar la MISMA corrida no genera cambios nuevos", async () => {
   const r7 = await runIngest(
     {
       run_id: "run-7",
-      brands_covered: ["Bubba"],
+      tracked_ids: ["MLA100"],
       listings: [L({ price: 42000, seller: "CHARCO", has_installments: false, installments_text: null })],
     },
     q
@@ -353,7 +364,7 @@ await test("reenviar la MISMA corrida no genera cambios nuevos", async () => {
 
 await test("la corrida es idempotente por run_id (ON CONFLICT)", async () => {
   await runIngest(
-    { run_id: "run-7", brands_covered: ["Bubba"], listings: [L({ price: 42000, seller: "CHARCO", has_installments: false })] },
+    { run_id: "run-7", tracked_ids: ["MLA100"], listings: [L({ price: 42000, seller: "CHARCO", has_installments: false })] },
     q
   );
   const res = await q(`SELECT COUNT(*)::int AS n FROM runs WHERE id = 'run-7'`);

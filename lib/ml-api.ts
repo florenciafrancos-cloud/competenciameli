@@ -1,23 +1,35 @@
 /**
  * Cliente de la API oficial de Mercado Libre.
  *
- * Por qué la API oficial y no scraping: Mercado Libre bloquea el scraping
- * automatizado (las paginas de resultados no entregan las publicaciones a
- * un navegador automatizado, y redirige a una pantalla de verificacion).
- * La API oficial es gratuita, permite consultar publicaciones de CUALQUIER
- * vendedor, y no depende de ninguna computadora prendida.
+ * QUE SE PUEDE Y QUE NO (verificado el 28/08/2026 contra la API real)
+ * ------------------------------------------------------------------
+ * Mercado Libre cerro la busqueda publica para aplicaciones no
+ * certificadas. Con un token valido:
+ *
+ *   /sites/MLA/search?q=...            -> 403 forbidden
+ *   /sites/MLA/search?nickname=...     -> 403 forbidden
+ *   /sites/MLA/search?seller_id=...    -> 403 forbidden
+ *   /highlights/MLA/category/...       -> 403 forbidden
+ *
+ *   /items?ids=MLA1,MLA2               -> 200 OK
+ *   /items/{id}                        -> 200 OK
+ *   /products/search                   -> 200 OK
+ *   /users/{id}/items/search           -> 200 OK (solo publicaciones propias)
+ *
+ * Por eso el sistema NO descubre publicaciones: sigue una lista concreta
+ * de links que carga el usuario. Eso es exactamente lo que /items permite.
  *
  * Autenticacion: OAuth2 authorization_code (una sola vez, a mano) +
  * refresh_token. El access_token dura 6 horas; el refresh_token dura
- * 6 meses y es de UN SOLO USO — cada refresh devuelve uno nuevo que hay
+ * 6 meses y es de UN SOLO USO — cada refresco devuelve uno nuevo que hay
  * que guardar, por eso se persiste en la base y no en variables de entorno.
+ * Requiere el scope `offline_access` en la aplicacion.
  */
 
 import type { Query } from "./ingest-core";
 import type { ScrapedListing } from "./types";
 
 const ML_API = "https://api.mercadolibre.com";
-const SITE = process.env.ML_SITE_ID || "MLA"; // MLA = Argentina
 
 // ---------------------------------------------------------------
 // Tokens
@@ -47,8 +59,7 @@ export async function getAccessToken(q: Query): Promise<string> {
 
   // Margen de 10 minutos para no usar un token que vence en el medio.
   const expiresAt = new Date(row.expires_at);
-  const margin = 10 * 60 * 1000;
-  if (expiresAt.getTime() - margin > Date.now()) {
+  if (expiresAt.getTime() - 10 * 60 * 1000 > Date.now()) {
     return row.access_token as string;
   }
 
@@ -60,13 +71,10 @@ export async function refreshAccessToken(
   q: Query,
   refreshToken: string
 ): Promise<string> {
-  const clientId = requireEnv("ML_CLIENT_ID");
-  const clientSecret = requireEnv("ML_CLIENT_SECRET");
-
   const body = new URLSearchParams({
     grant_type: "refresh_token",
-    client_id: clientId,
-    client_secret: clientSecret,
+    client_id: requireEnv("ML_CLIENT_ID"),
+    client_secret: requireEnv("ML_CLIENT_SECRET"),
     refresh_token: refreshToken,
   });
 
@@ -147,25 +155,23 @@ export async function exchangeCodeForTokens(
       }`
     );
   }
-
   if (!data.access_token) {
     throw new Error(
       `Mercado Libre no devolvio un access_token. Respuesta: ${JSON.stringify(data)}`
     );
   }
 
-  // Mercado Libre solo entrega refresh_token si la aplicacion tiene el
-  // scope `offline_access` habilitado. Sin el, el permiso duraria 6 horas
-  // y el sistema no podria renovarse solo — asi que es un error, no un
-  // detalle: preferimos fallar aca con un mensaje claro antes que guardar
-  // un permiso que se va a romper esta misma tarde.
+  // ML solo entrega refresh_token si la aplicacion tiene el scope
+  // `offline_access`. Sin el, el permiso duraria 6 horas: preferimos
+  // fallar aca con un mensaje claro antes que guardar algo que se rompe
+  // esta misma tarde.
   if (!data.refresh_token) {
     throw new Error(
       "Mercado Libre no devolvio un refresh_token. Falta habilitar el scope " +
         "`offline_access` en la aplicacion: entrá a " +
         "https://developers.mercadolibre.com.ar/devcenter, editá la aplicacion, " +
         "marcá `offline_access` junto con `read`, guardá, y volvé a autorizar " +
-        "desde /api/ml/auth. Sin ese scope el permiso duraria solo 6 horas."
+        "desde /api/ml/auth."
     );
   }
 
@@ -183,264 +189,340 @@ function requireEnv(name: string): string {
 }
 
 // ---------------------------------------------------------------
-// Búsqueda
+// Links de Mercado Libre -> ID de publicacion
 // ---------------------------------------------------------------
 
-type MlSearchItem = {
+/**
+ * Extrae el ID de publicacion de un link de Mercado Libre.
+ *
+ * Formatos que maneja:
+ *   https://articulo.mercadolibre.com.ar/MLA-1234567890-termo-bubba-_JM
+ *   https://www.mercadolibre.com.ar/termo-bubba/p/MLA1234567890
+ *   https://mercadolibre.com.ar/MLA1234567890
+ *   MLA1234567890            (pegar el ID directo tambien vale)
+ *   MLA-1234567890
+ */
+export function parseMlId(input: string): string | null {
+  const text = (input ?? "").trim();
+  if (!text) return null;
+
+  // Un ID pegado directo.
+  const direct = text.match(/^(ML[A-Z])-?(\d{6,})$/i);
+  if (direct) return `${direct[1].toUpperCase()}${direct[2]}`;
+
+  // Dentro de una URL. Tomamos la primera aparicion.
+  const inUrl = text.match(/(ML[A-Z])-?(\d{6,})/i);
+  if (inUrl) return `${inUrl[1].toUpperCase()}${inUrl[2]}`;
+
+  return null;
+}
+
+// ---------------------------------------------------------------
+// Consulta de publicaciones
+// ---------------------------------------------------------------
+
+type MlItem = {
   id: string;
-  title: string;
+  title?: string;
   permalink?: string;
   price?: number;
   original_price?: number | null;
+  base_price?: number | null;
   currency_id?: string;
   available_quantity?: number;
   status?: string;
-  seller?: { id?: number; nickname?: string };
+  sub_status?: string[];
   seller_id?: number;
   official_store_id?: number | null;
   attributes?: { id?: string; name?: string; value_name?: string | null }[];
-  installments?: {
-    quantity?: number;
-    amount?: number;
-    rate?: number;
-    currency_id?: string;
-  } | null;
   sale_price?: { amount?: number; regular_amount?: number | null } | null;
+  catalog_product_id?: string | null;
 };
 
-async function mlFetch(path: string, token: string): Promise<any> {
+async function mlFetch(
+  path: string,
+  token: string
+): Promise<{ ok: boolean; status: number; data: any; text: string }> {
   const r = await fetch(`${ML_API}${path}`, {
     headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
   });
-  if (!r.ok) {
-    const text = await r.text().catch(() => "");
-    throw new Error(`ML API ${r.status} en ${path}: ${text.slice(0, 300)}`);
+  const text = await r.text();
+  let data: any = undefined;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    /* no era JSON */
   }
-  return r.json();
+  return { ok: r.ok, status: r.status, data, text };
 }
 
 /** Lee el valor del atributo BRAND de una publicacion. */
-function brandOf(item: MlSearchItem): string | null {
+function brandOf(item: MlItem): string | null {
   const attr = item.attributes?.find(
     (a) => a.id === "BRAND" || a.name?.toLowerCase() === "marca"
   );
   return attr?.value_name?.trim() || null;
 }
 
+/**
+ * Resuelve el nombre (nickname) de un vendedor, con cache por corrida.
+ * Si la API no lo permite, devuelve null y seguimos con el seller_id.
+ */
+export class SellerResolver {
+  private cache = new Map<number, string | null>();
+  private failed = false;
+
+  constructor(private token: string) {}
+
+  async nickname(sellerId: number | null | undefined): Promise<string | null> {
+    if (!sellerId || this.failed) return null;
+    if (this.cache.has(sellerId)) return this.cache.get(sellerId) ?? null;
+
+    const res = await mlFetch(`/users/${sellerId}`, this.token);
+    if (!res.ok) {
+      // Si el endpoint esta cerrado, no insistimos en cada publicacion.
+      if (res.status === 403 || res.status === 401) this.failed = true;
+      this.cache.set(sellerId, null);
+      return null;
+    }
+    const nick = (res.data?.nickname ?? "").toString().trim() || null;
+    this.cache.set(sellerId, nick);
+    return nick;
+  }
+
+  get unavailable(): boolean {
+    return this.failed;
+  }
+}
+
+/**
+ * Consulta las cuotas de una publicacion.
+ *
+ * Las cuotas no vienen en /items: eran parte de la respuesta de busqueda,
+ * que esta cerrada. Se intenta /items/{id}/prices, que expone las
+ * condiciones de financiacion cuando estan disponibles. Si el endpoint no
+ * responde, devolvemos `null` (desconocido) y NO `false`, para no generar
+ * una alerta falsa de "dejo de ofrecer cuotas".
+ */
+export async function fetchInstallments(
+  mlId: string,
+  token: string
+): Promise<{ has: boolean | null; text: string | null }> {
+  const res = await mlFetch(`/items/${mlId}/prices`, token);
+  if (!res.ok || !res.data) return { has: null, text: null };
+
+  const prices: any[] = Array.isArray(res.data?.prices) ? res.data.prices : [];
+
+  for (const p of prices) {
+    const inst =
+      p?.conditions?.installments ??
+      p?.installments ??
+      p?.metadata?.installments;
+    if (inst && (inst.quantity ?? 0) > 1) {
+      const rate = inst.rate ?? inst.interest_rate;
+      return {
+        has: true,
+        text:
+          `${inst.quantity} cuotas` +
+          (inst.amount ? ` de ${Math.round(inst.amount)}` : "") +
+          (rate === 0 ? " sin interés" : ""),
+      };
+    }
+  }
+
+  // La respuesta vino bien pero sin informacion de cuotas: eso sí es
+  // informacion — no hay financiacion declarada.
+  const hasAnyInstallmentInfo = prices.some(
+    (p) =>
+      p?.conditions?.installments !== undefined ||
+      p?.installments !== undefined ||
+      p?.metadata?.installments !== undefined
+  );
+  return hasAnyInstallmentInfo
+    ? { has: false, text: null }
+    : { has: null, text: null };
+}
+
 /** Convierte un item de la API al formato que espera la ingesta. */
-function toScrapedListing(item: MlSearchItem, brand: string): ScrapedListing {
-  // ML expone el precio vigente en `price` y el tachado en `original_price`.
-  // `sale_price` es la version nueva del mismo dato; usamos la que venga.
+function toListing(
+  item: MlItem,
+  sellerNick: string | null,
+  installments: { has: boolean | null; text: string | null }
+): ScrapedListing {
   const price = item.sale_price?.amount ?? item.price ?? 0;
   const listPrice =
-    item.sale_price?.regular_amount ?? item.original_price ?? null;
+    item.sale_price?.regular_amount ??
+    item.original_price ??
+    (item.base_price && item.base_price > price ? item.base_price : null);
 
   const discountPct =
     listPrice && listPrice > price
       ? Number((((listPrice - price) / listPrice) * 100).toFixed(2))
       : null;
 
-  const inst = item.installments;
-  const hasInstallments = !!(inst && (inst.quantity ?? 0) > 1);
-  const installmentsText = hasInstallments
-    ? `${inst!.quantity} cuotas de ${inst!.amount}${
-        inst!.rate === 0 ? " sin interes" : ""
-      }`
-    : null;
-
   return {
     ml_id: item.id,
-    title: item.title ?? item.id,
-    brand,
+    title: (item.title ?? item.id).trim(),
+    brand: brandOf(item) ?? "",
     url: item.permalink ?? null,
-    seller: item.seller?.nickname ?? null,
-    official_store: item.official_store_id != null ? true : false,
-    list_price: listPrice,
+    seller: sellerNick,
+    seller_id: item.seller_id ?? null,
+    official_store: item.official_store_id != null,
+    list_price: listPrice ?? null,
     price,
     discount_pct: discountPct,
-    has_installments: hasInstallments,
-    installments_text: installmentsText,
+    has_installments: installments.has,
+    installments_text: installments.text,
     currency: item.currency_id ?? "ARS",
+    ml_status: item.status ?? null,
+    available_quantity: item.available_quantity ?? null,
   };
 }
 
-export type ScanBrandResult = {
-  brand: string;
+export type FetchItemsResult = {
   listings: ScrapedListing[];
-  total_reported: number;
-  pages_read: number;
-  filtered_out: number;
+  /** IDs que Mercado Libre no encontro: publicaciones borradas. */
+  notFound: string[];
   warnings: string[];
 };
 
 /**
- * Releva todas las publicaciones de una marca.
+ * Consulta un conjunto de publicaciones por ID.
  *
- * Filtra por el atributo BRAND exacto, que es la leccion del relevamiento
- * manual de agosto: buscar "bubba" por texto trae mochilas, libros
- * infantiles, gorras "Bubba Gump" y cascos de moto. El filtro por marca
- * exacta es lo que evita esos falsos positivos.
+ * Es el corazon del sistema. Usa el multiget (/items?ids=) en lotes de 20,
+ * que es el maximo que acepta la API.
  */
-export async function scanBrand(
-  brand: string,
+export async function fetchItems(
+  ids: string[],
   token: string,
-  opts: { maxPages?: number; pageSize?: number } = {}
-): Promise<ScanBrandResult> {
-  const pageSize = opts.pageSize ?? 50;
-  // ML no permite offset > 1000 en la busqueda publica.
-  const maxPages = opts.maxPages ?? 20;
+  opts: { withInstallments?: boolean } = {}
+): Promise<FetchItemsResult> {
+  const withInstallments = opts.withInstallments ?? true;
+  const unique = [...new Set(ids.map((i) => i.trim().toUpperCase()))].filter(
+    Boolean
+  );
 
-  const byId = new Map<string, ScrapedListing>();
+  const listings: ScrapedListing[] = [];
+  const notFound: string[] = [];
   const warnings: string[] = [];
-  let totalReported = 0;
-  let pagesRead = 0;
-  let filteredOut = 0;
+  const sellers = new SellerResolver(token);
 
-  for (let page = 0; page < maxPages; page++) {
-    const offset = page * pageSize;
-    if (offset >= 1000) {
+  for (let i = 0; i < unique.length; i += 20) {
+    const batch = unique.slice(i, i + 20);
+    const res = await mlFetch(`/items?ids=${batch.join(",")}`, token);
+
+    if (!res.ok) {
       warnings.push(
-        `Se alcanzo el limite de 1000 posiciones que permite la API. Si la marca tiene mas publicaciones distintas, conviene dividir la busqueda por categoria.`
+        `No se pudo consultar el lote ${batch.join(", ")}: ML respondió ${
+          res.status
+        } ${res.text.slice(0, 160)}`
       );
-      break;
+      continue;
     }
 
-    let data: any;
-    try {
-      data = await mlFetch(
-        `/sites/${SITE}/search?q=${encodeURIComponent(
-          brand
-        )}&limit=${pageSize}&offset=${offset}`,
-        token
-      );
-    } catch (err) {
+    const entries: any[] = Array.isArray(res.data) ? res.data : [];
+    if (entries.length === 0) {
       warnings.push(
-        `Error leyendo la pagina ${page + 1}: ${
-          err instanceof Error ? err.message : String(err)
-        }`
+        `El lote ${batch.join(", ")} devolvió una respuesta vacía de Mercado Libre.`
       );
-      break;
+      continue;
     }
 
-    pagesRead++;
-    totalReported = data?.paging?.total ?? totalReported;
-    const results: MlSearchItem[] = data?.results ?? [];
-    if (results.length === 0) break;
+    for (const entry of entries) {
+      const code = entry?.code;
+      const body = entry?.body;
 
-    for (const item of results) {
-      const itemBrand = brandOf(item);
-      // Solo publicaciones cuya marca declarada coincide exactamente.
-      if (!itemBrand || itemBrand.toLowerCase() !== brand.toLowerCase()) {
-        filteredOut++;
+      if (code === 404 || (body && body?.error === "not_found")) {
+        const missing = body?.id ?? entry?.id ?? "(id desconocido)";
+        notFound.push(String(missing).toUpperCase());
         continue;
       }
+      if (code !== 200 || !body?.id) {
+        warnings.push(
+          `Respuesta inesperada de ML para una publicación (code ${code}).`
+        );
+        continue;
+      }
+
+      const item = body as MlItem;
       const price = item.sale_price?.amount ?? item.price;
       if (!price || price <= 0) {
-        filteredOut++;
+        warnings.push(
+          `${item.id}: Mercado Libre no devolvió un precio válido; se omite.`
+        );
         continue;
       }
-      // Dedup: ML repite publicaciones patrocinadas entre paginas.
-      if (!byId.has(item.id)) {
-        byId.set(item.id, toScrapedListing(item, brand));
-      }
-    }
 
-    // Si ya leimos todo lo que ML reporta, cortamos.
-    if (offset + results.length >= totalReported) break;
+      const nick = await sellers.nickname(item.seller_id);
+      const inst = withInstallments
+        ? await fetchInstallments(item.id, token)
+        : { has: null, text: null };
+
+      listings.push(toListing(item, nick, inst));
+    }
   }
 
-  if (byId.size === 0) {
+  // Los IDs que no volvieron ni como dato ni como 404: los tratamos como
+  // no consultados, no como bajas.
+  const returned = new Set([
+    ...listings.map((l) => l.ml_id),
+    ...notFound,
+  ]);
+  const missing = unique.filter((id) => !returned.has(id));
+  if (missing.length > 0) {
     warnings.push(
-      `No se encontro ninguna publicacion con marca exacta "${brand}". Verificá que el nombre coincida con como ML escribe la marca.`
+      `${missing.length} publicación(es) no devolvieron respuesta y se excluyen de esta corrida (no se marcan de baja): ${missing
+        .slice(0, 10)
+        .join(", ")}`
     );
   }
 
-  return {
-    brand,
-    listings: [...byId.values()],
-    total_reported: totalReported,
-    pages_read: pagesRead,
-    filtered_out: filteredOut,
-    warnings,
-  };
-}
-
-/** Releva un vendedor completo (todas sus publicaciones activas). */
-export async function scanSeller(
-  nickname: string,
-  token: string,
-  opts: { maxPages?: number; pageSize?: number } = {}
-): Promise<ScanBrandResult> {
-  const pageSize = opts.pageSize ?? 50;
-  const maxPages = opts.maxPages ?? 20;
-  const byId = new Map<string, ScrapedListing>();
-  const warnings: string[] = [];
-  let totalReported = 0;
-  let pagesRead = 0;
-
-  for (let page = 0; page < maxPages; page++) {
-    const offset = page * pageSize;
-    if (offset >= 1000) break;
-
-    let data: any;
-    try {
-      data = await mlFetch(
-        `/sites/${SITE}/search?nickname=${encodeURIComponent(
-          nickname
-        )}&limit=${pageSize}&offset=${offset}`,
-        token
-      );
-    } catch (err) {
-      warnings.push(
-        `Error leyendo el vendedor ${nickname}: ${
-          err instanceof Error ? err.message : String(err)
-        }`
-      );
-      break;
-    }
-
-    pagesRead++;
-    totalReported = data?.paging?.total ?? totalReported;
-    const results: MlSearchItem[] = data?.results ?? [];
-    if (results.length === 0) break;
-
-    for (const item of results) {
-      const price = item.sale_price?.amount ?? item.price;
-      if (!price || price <= 0) continue;
-      if (!byId.has(item.id)) {
-        byId.set(item.id, toScrapedListing(item, brandOf(item) ?? nickname));
-      }
-    }
-
-    if (offset + results.length >= totalReported) break;
+  if (sellers.unavailable) {
+    warnings.push(
+      "Mercado Libre no permite consultar el nombre de los vendedores con este token; se sigue el resto igual, pero no se detectan cambios de vendedor."
+    );
   }
 
-  return {
-    brand: nickname,
-    listings: [...byId.values()],
-    total_reported: totalReported,
-    pages_read: pagesRead,
-    filtered_out: 0,
-    warnings,
-  };
+  return { listings, notFound, warnings };
 }
 
-/** Trae publicaciones puntuales por ID (multiget, hasta 20 por llamada). */
-export async function fetchItems(
-  ids: string[],
+/**
+ * Chequea que un ID exista antes de agregarlo al seguimiento, y devuelve
+ * un resumen para mostrar en el dashboard.
+ */
+export async function previewItem(
+  mlId: string,
   token: string
-): Promise<ScrapedListing[]> {
-  const out: ScrapedListing[] = [];
-  for (let i = 0; i < ids.length; i += 20) {
-    const batch = ids.slice(i, i + 20);
-    const data = await mlFetch(`/items?ids=${batch.join(",")}`, token);
-    for (const entry of data ?? []) {
-      if (entry?.code !== 200 || !entry?.body) continue;
-      const item = entry.body as MlSearchItem;
-      const price = item.sale_price?.amount ?? item.price;
-      if (!price || price <= 0) continue;
-      out.push(toScrapedListing(item, brandOf(item) ?? ""));
-    }
+): Promise<
+  | { ok: true; listing: ScrapedListing }
+  | { ok: false; error: string }
+> {
+  const res = await mlFetch(`/items/${mlId}`, token);
+  if (res.status === 404) {
+    return {
+      ok: false,
+      error: `Mercado Libre no encontró la publicación ${mlId}. Revisá el link.`,
+    };
   }
-  return out;
+  if (!res.ok) {
+    return {
+      ok: false,
+      error: `Mercado Libre respondió ${res.status} al consultar ${mlId}: ${res.text.slice(0, 160)}`,
+    };
+  }
+
+  const item = res.data as MlItem;
+  const price = item.sale_price?.amount ?? item.price;
+  if (!price || price <= 0) {
+    return {
+      ok: false,
+      error: `La publicación ${mlId} no tiene un precio consultable.`,
+    };
+  }
+
+  const sellers = new SellerResolver(token);
+  const nick = await sellers.nickname(item.seller_id);
+  const inst = await fetchInstallments(mlId, token);
+
+  return { ok: true, listing: toListing(item, nick, inst) };
 }

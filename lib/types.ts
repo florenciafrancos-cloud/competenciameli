@@ -1,6 +1,9 @@
-// Tipos compartidos entre el scraper, la API y el dashboard.
+// Tipos compartidos entre el cliente de Mercado Libre, la API y el dashboard.
 
-/** Una publicacion tal como la manda el scraper. */
+/** Estado de la publicacion segun Mercado Libre. */
+export type MlStatus = "active" | "paused" | "closed" | "under_review" | string;
+
+/** Una publicacion tal como queda despues de consultar /items. */
 export type ScrapedListing = {
   /** ID de Mercado Libre, ej. "MLA1234567890". Es la clave unica. */
   ml_id: string;
@@ -8,6 +11,7 @@ export type ScrapedListing = {
   brand: string;
   url?: string | null;
   seller?: string | null;
+  seller_id?: number | null;
   official_store?: boolean | null;
   /** Precio tachado / de lista. null si no hay descuento. */
   list_price?: number | null;
@@ -17,21 +21,34 @@ export type ScrapedListing = {
   has_installments?: boolean | null;
   installments_text?: string | null;
   currency?: string | null;
+  /** Estado en ML: active, paused, closed. */
+  ml_status?: MlStatus | null;
+  available_quantity?: number | null;
 };
 
-/** Payload completo que el scraper hace POST a /api/ingest. */
+/** Payload que recibe /api/ingest. */
 export type IngestPayload = {
-  /** Identificador de la corrida. Ej. "2026-08-28" o "2026-08-28T09:00". */
+  /** Identificador de la corrida. Ej. "2026-08-28" o "2026-08-28 09:00". */
   run_id: string;
-  /** De donde vino. Ej. "claude-chrome". */
+  /** De donde vino. Ej. "ml-api-cron". */
   source?: string;
   /**
-   * Marcas efectivamente relevadas en esta corrida.
-   * CRITICO: solo se evaluan bajas (delisted) de las marcas que estan aca.
-   * Si una marca no se pudo relevar, NO incluirla, para no marcar
-   * todas sus publicaciones como dadas de baja por error.
+   * IDs que se consultaron explicitamente en esta corrida.
+   *
+   * Es el modo principal del sistema: se sigue una lista concreta de
+   * publicaciones. Un ID que esta aca y NO aparece en `listings` se
+   * interpreta como dado de baja (ML devolvio 404 para el).
    */
-  brands_covered: string[];
+  tracked_ids?: string[];
+  /**
+   * Marcas relevadas por busqueda. Quedo sin uso porque Mercado Libre
+   * cerro la busqueda publica de su API (403), pero se mantiene para no
+   * romper compatibilidad si alguna vez la reabren o si se carga un
+   * relevamiento desde otra fuente.
+   *
+   * Si se usa: solo se evaluan bajas de las marcas incluidas aca.
+   */
+  brands_covered?: string[];
   listings: ScrapedListing[];
   notes?: string;
 };
@@ -44,7 +61,12 @@ export type ChangeType =
   | "relisted"
   | "seller_change"
   | "installments_added"
-  | "installments_removed";
+  | "installments_removed"
+  | "installments_changed"
+  | "paused"
+  | "reactivated"
+  | "out_of_stock"
+  | "back_in_stock";
 
 export type DetectedChange = {
   ml_id: string;
@@ -66,6 +88,7 @@ export type ListingRow = {
   brand: string | null;
   url: string | null;
   seller: string | null;
+  seller_id: string | number | null;
   official_store: boolean | null;
   list_price: string | number | null;
   price: string | number | null;
@@ -74,6 +97,8 @@ export type ListingRow = {
   installments_text: string | null;
   currency: string | null;
   status: string;
+  ml_status: string | null;
+  available_quantity: number | null;
   first_seen_at: string;
   last_seen_at: string;
   updated_at: string;
@@ -97,12 +122,34 @@ export type ChangeRow = {
 };
 
 export const CHANGE_LABELS: Record<ChangeType, string> = {
-  price_up: "Subio precio",
-  price_down: "Bajo precio",
-  new_listing: "Publicacion nueva",
-  delisted: "Publicacion dada de baja",
-  relisted: "Volvio a publicarse",
-  seller_change: "Cambio de vendedor",
-  installments_added: "Empezo a ofrecer cuotas",
-  installments_removed: "Dejo de ofrecer cuotas",
+  price_down: "Bajó el precio",
+  price_up: "Subió el precio",
+  new_listing: "Publicación nueva",
+  delisted: "Dada de baja",
+  relisted: "Volvió a publicarse",
+  seller_change: "Cambió el vendedor",
+  installments_added: "Empezó a ofrecer cuotas",
+  installments_removed: "Dejó de ofrecer cuotas",
+  installments_changed: "Cambió las cuotas",
+  paused: "Pausada",
+  reactivated: "Reactivada",
+  out_of_stock: "Sin stock",
+  back_in_stock: "Volvió a tener stock",
 };
+
+/** Orden en que se muestran los cambios: primero lo que más importa. */
+export const CHANGE_ORDER: ChangeType[] = [
+  "price_down",
+  "price_up",
+  "delisted",
+  "paused",
+  "out_of_stock",
+  "relisted",
+  "reactivated",
+  "back_in_stock",
+  "installments_added",
+  "installments_removed",
+  "installments_changed",
+  "seller_change",
+  "new_listing",
+];

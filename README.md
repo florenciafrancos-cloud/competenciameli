@@ -1,35 +1,52 @@
 # Monitor de competencia — Mercado Libre
 
-Sigue los precios y los cambios de las publicaciones de la competencia en
-Mercado Libre. Una vez por día se despierta solo, consulta Mercado Libre,
-compara contra lo que vio la última vez y te manda un mail si algo cambió.
+Pegás los links de las publicaciones de la competencia que te importan.
+Una vez por día la app las revisa una por una y te avisa por mail si algo
+cambió.
 
-Detecta: **cambios de precio**, **publicaciones nuevas**, **publicaciones dadas
-de baja**, **cambios de vendedor** y **aparición o desaparición de cuotas**.
+Detecta, para cada publicación que sigas:
+
+- **Precio** (con el monto y el porcentaje del cambio)
+- **Cuotas** — si empieza, deja de ofrecerlas, o cambian las condiciones (6 → 12)
+- **Vendedor** — si la publicación pasa a manos de otro
+- **Pausas y bajas** — si el vendedor la pausa, la cierra, o la borra
+- **Stock** — si se queda sin stock o vuelve a tenerlo
+
+Y guarda el historial de precios de cada una, para ver la evolución.
 
 ---
 
-## Por qué usa la API oficial y no scraping
+## Lo que se puede y lo que no
 
-La primera versión de este proyecto iba a leer las páginas de Mercado Libre
-directamente. No funciona: ML bloquea la navegación automatizada — las páginas
-de resultados devuelven el cascarón sin las publicaciones, y en algunos casos
-redirigen a una pantalla de verificación anti-bots.
+Esto importa entenderlo, porque define la forma de la herramienta.
 
-La API oficial (gratuita) resuelve esto mejor en todo sentido: no depende de
-ninguna computadora prendida, no hay riesgo de bloqueo, corre sola en Vercel, y
-es el camino que Mercado Libre habilita para esto. El costo es un trámite de
-10 minutos, una sola vez: registrar una aplicación y autorizarla. Está abajo.
+**Mercado Libre cerró la búsqueda pública de su API** para aplicaciones no
+certificadas. Verificado el 28/08/2026 contra la API real, con un token válido:
+
+| Endpoint | Resultado |
+|---|---|
+| `/sites/MLA/search?q=...` (buscar por marca) | **403 forbidden** |
+| `/sites/MLA/search?seller_id=...` (por vendedor) | **403 forbidden** |
+| `/highlights/MLA/category/...` (destacados) | **403 forbidden** |
+| `/items?ids=...` (detalle de publicaciones) | **200 OK** |
+| `/items/{id}` | **200 OK** |
+
+Tampoco sirve leer las páginas de Mercado Libre directamente: bloquea la
+navegación automatizada — las páginas de resultados devuelven el cascarón sin
+las publicaciones, y redirigen a una pantalla de verificación anti-bots.
+
+**Consecuencia:** la app **no descubre** publicaciones nuevas de una marca.
+Vos le decís qué seguir, pegando links. Eso es exactamente lo que `/items`
+permite hacer, y funciona bien: seguir 50 publicaciones de la competencia es
+un solo pedido cada 20 publicaciones.
 
 ---
 
 ## Puesta en marcha
 
-Son cinco pasos. El único que lleva algo de tiempo es el 3.
-
 ### 1. Subir el código a GitHub y conectarlo a Vercel
 
-Desde esta carpeta:
+Si trabajás con Git:
 
 ```bash
 git init
@@ -40,120 +57,134 @@ git remote add origin https://github.com/TU-USUARIO/TU-REPO.git
 git push -u origin main
 ```
 
-En Vercel: **Add New → Project → Import** ese repo. Framework: Next.js
-(lo detecta solo). No hace falta cambiar nada más todavía.
+También se puede subir arrastrando los archivos en github.com
+(**Add file → Upload files**). En ese caso arrastrá **el contenido** de esta
+carpeta, no la carpeta: si queda anidada, Vercel no reconoce el proyecto.
+
+En Vercel: **Add New → Project → Import** ese repo. Verificá que el
+**Framework Preset** diga **Next.js**.
 
 ### 2. Crear la base de datos
 
 En el proyecto de Vercel: **Storage → Create Database → Postgres (Neon)**.
-Al vincularla al proyecto, Vercel carga la variable de conexión sola.
+Dejá **Auth apagado** (no se usa). Al vincularla al proyecto, Vercel carga la
+variable de conexión sola.
 
 ### 3. Registrar la aplicación en Mercado Libre
 
-1. Entrá a <https://developers.mercadolibre.com.ar/devcenter> con tu cuenta de
-   Mercado Libre y creá una aplicación (**Crear nueva aplicación**).
-2. En **Redirect URI** poné exactamente:
+1. Entrá a <https://developers.mercadolibre.com.ar/devcenter> con tu cuenta y
+   creá una aplicación.
+2. **Redirect URI**, exactamente así y sin barra al final:
    `https://TU-PROYECTO.vercel.app/api/ml/callback`
-3. En **Scopes** marcá **`read`** y **`offline_access`**.
+3. **Scopes**: marcá **`read`** y **`offline_access`**.
 
    > `offline_access` es obligatorio. Es el scope que hace que Mercado Libre
    > entregue un `refresh_token`; sin él el permiso dura 6 horas y el sistema
    > no puede renovarse solo.
-4. Guardá y copiá el **App ID** (es el `client_id`) y el **Secret Key**
-   (el `client_secret`).
 
-> El `client_secret` es una credencial: va en las variables de entorno de
-> Vercel, no en el código ni en el repo.
+4. Guardá y copiá el **App ID** (`client_id`) y el **Secret Key**
+   (`client_secret`).
 
 ### 4. Cargar las variables de entorno en Vercel
 
-**Settings → Environment Variables**. Las obligatorias:
+**Settings → Environment Variables**. Obligatorias:
 
 | Variable | Qué es |
 |---|---|
 | `ML_CLIENT_ID` | El App ID del paso 3 |
 | `ML_CLIENT_SECRET` | El Secret Key del paso 3 |
-| `INGEST_SECRET` | Una clave larga inventada por vos. Sirve para crear las tablas y para correr el relevamiento a mano |
-| `CRON_SECRET` | Otra clave larga inventada. Es la que usa el cron de Vercel |
+| `INGEST_SECRET` | Una clave larga al azar. Sirve para el diagnóstico y para correr el control a mano |
+| `CRON_SECRET` | Otra clave larga al azar. La usa el cron de Vercel |
 | `DASHBOARD_PASSWORD` | La contraseña para entrar al tablero |
-| `NEXT_PUBLIC_APP_URL` | `https://TU-PROYECTO.vercel.app` |
+| `NEXT_PUBLIC_APP_URL` | `https://TU-PROYECTO.vercel.app` (tipo **Config**, no Secret) |
 
-Opcionales, para los mails de alerta (sin esto todo funciona igual, solo que
-no manda mails y los cambios se ven únicamente en el tablero):
+Opcionales, para los mails de alerta. Sin esto todo funciona igual, solo que
+los cambios se ven únicamente en el tablero:
 
 | Variable | Qué es |
 |---|---|
 | `RESEND_API_KEY` | API key gratuita de <https://resend.com> |
-| `ALERT_EMAIL_TO` | Tu mail. Se pueden poner varios separados por coma |
+| `ALERT_EMAIL_TO` | Tu mail. Varios separados por coma |
 | `ALERT_EMAIL_FROM` | `onboarding@resend.dev` sirve para arrancar |
 
-Para generar las claves, en una terminal: `openssl rand -hex 32`.
+Para generar las claves: `openssl rand -hex 32`.
 
-Después de cargarlas, **Deployments → Redeploy** (las variables nuevas no
-entran en un deploy ya hecho).
+Después de cargarlas, **Deployments → Redeploy**. Las variables nuevas no
+entran en un deploy ya hecho.
 
-### 5. Crear las tablas y autorizar
+### 5. Crear las tablas
 
-Entrá a `https://TU-PROYECTO.vercel.app` y poné tu contraseña. La primera vez
-el tablero avisa que faltan las tablas y muestra un botón **Crear las tablas** —
-apretalo. Se puede repetir sin riesgo.
+Entrá a `https://TU-PROYECTO.vercel.app` con tu contraseña. La primera vez el
+tablero avisa que faltan las tablas y muestra un botón **Crear las tablas**.
+Se puede repetir sin riesgo.
 
-> También se puede por línea de comandos, si preferís:
+> Por línea de comandos, si preferís:
 > ```bash
 > curl -X POST https://TU-PROYECTO.vercel.app/api/setup \
 >   -H "Authorization: Bearer TU_INGEST_SECRET"
 > ```
 > En PowerShell usá `curl.exe`, no `curl` (que ahí es otro comando).
 >
-> Y `GET /api/setup` dice qué tablas existen, sin crear nada.
+> `GET /api/setup` dice qué tablas existen, sin crear nada.
 
-Autorizar la app: abrí en el navegador
-`https://TU-PROYECTO.vercel.app/api/ml/auth`, aceptá el permiso, y listo.
-Los tokens quedan guardados y el sistema los renueva solo.
+### 6. Autorizar Mercado Libre
 
-Volvé al tablero y apretá **Relevar ahora** para cargar la primera foto.
+Abrí `https://TU-PROYECTO.vercel.app/api/ml/auth` y aceptá el permiso. Los
+tokens quedan guardados y el sistema los renueva solo.
 
-> La primera corrida no manda mail a propósito: son cientos de publicaciones
-> y todas contarían como "nuevas". A partir de la segunda, solo avisa lo que
-> cambió de verdad.
+### 7. Cargar la primera publicación
+
+En el tablero, pegá el link de una publicación de la competencia y
+**Agregar**. Se verifica al instante contra Mercado Libre, así sabés en el
+momento si el link está bien, y queda guardada la foto inicial de precio.
+
+Al día siguiente (o apretando **Controlar ahora**) ya compara y avisa.
 
 ---
 
-## Cómo agregar marcas o competidores nuevos
+## Cómo agregar o quitar publicaciones
 
-En el tablero, pestaña **Qué se monitorea** → escribís la marca → **Agregar**.
-Eso es todo: la corrida del día siguiente ya la incluye, no hay que tocar
-código, y el historial de lo que venías siguiendo no se pierde.
+Pestaña **Qué se monitorea**:
 
-Se puede seguir por:
+- **Agregar**: pegás el link y listo. Acepta los dos formatos de URL de ML
+  (`articulo.mercadolibre.com.ar/MLA-...` y `/p/MLA...`) y también el código
+  `MLA...` pegado directo.
+- **Dejar de seguir**: un click. No se borra el historial: si la volvés a
+  agregar, la serie de precios sigue estando.
 
-- **Marca** — todas las publicaciones de esa marca, de cualquier vendedor.
-- **Vendedor / tienda** — todo lo que publica un competidor puntual.
-- **URL** — una publicación específica que querés vigilar de cerca.
-
-Un detalle sobre el filtro de marca: busca por la marca **declarada** en la
-publicación, no por el texto del título. Eso es lo que evita que "Bubba" traiga
-mochilas, libros infantiles, gorras de Bubba Gump y cascos de moto, que fue
-exactamente el problema del relevamiento manual de agosto.
+No hay límite práctico. Cada control agrupa las publicaciones en lotes de 20,
+que es el máximo por pedido que acepta la API.
 
 ---
 
 ## Cuándo corre
 
-Todos los días a las **9:00 de Argentina** (`vercel.json`, en UTC: `0 12 * * *`).
+Todos los días a las **9:00 de Argentina** (`vercel.json`, en UTC:
+`0 12 * * *`).
 
-Para cambiar el horario, editá `vercel.json` y volvé a deployar. Tené en cuenta
-que el plan gratuito de Vercel permite **un cron por día**; si querés que corra
-más seguido hace falta el plan Pro.
+Para cambiar el horario, editá `vercel.json` y volvé a deployar. El plan
+gratuito de Vercel permite **un cron por día**; para más seguido hace falta
+el plan Pro.
 
-Correrlo a mano, sin esperar al cron:
+A mano, sin esperar: el botón **Controlar ahora** del tablero, o
 
 ```bash
 curl -X POST https://TU-PROYECTO.vercel.app/api/cron/scan \
   -H "Authorization: Bearer TU_INGEST_SECRET"
 ```
 
-O directamente el botón **Relevar ahora** del tablero.
+---
+
+## Si algo no funciona
+
+`GET /api/ml/diag` prueba, uno por uno, los endpoints de Mercado Libre que
+este proyecto podría usar, y reporta cuál responde y cuál da 403. Se puede
+pasar `?item=MLA123...` con una publicación real para probar los endpoints de
+detalle.
+
+Es la herramienta para distinguir "está mal configurado" de "Mercado Libre
+cambió las reglas otra vez". Esa distinción costó una tarde entera de
+diagnóstico, así que quedó automatizada.
 
 ---
 
@@ -161,40 +192,45 @@ O directamente el botón **Relevar ahora** del tablero.
 
 ```bash
 npm install
-```
-
-Para levantarlo local necesitás las variables en un archivo `.env.local`
-(copiá `.env.example` y completalo; la cadena de conexión de la base la saca de
-Vercel → Storage → tu base → `.env.local`).
-
-```bash
 npm run dev          # http://localhost:3000
 npm run build        # verifica que compila antes de subir
 ```
 
+Para local necesitás las variables en `.env.local` (copiá `.env.example`; la
+cadena de conexión la saca de Vercel → Storage → tu base → `.env.local`).
+
 ### Tests
 
-Hay 72 tests. Necesitan un Postgres local:
+Hay **90 tests**. Necesitan un Postgres local:
 
 ```bash
 npm test
 ```
 
-Por defecto apunta a `postgresql://postgres@localhost:5433/postgres`; se puede
-cambiar con la variable `PGURL`.
+Por defecto apunta a `postgresql://postgres@localhost:5433/postgres`;
+se cambia con la variable `PGURL`.
 
-Los tests cubren, entre otras cosas, el error más caro que puede tener este
-sistema: **si el relevamiento de una marca falla, sus publicaciones NO se
-marcan como dadas de baja**. Sin esa protección, un error de red de un día
-generaría un mail avisando que la competencia dio de baja 200 publicaciones que
-en realidad siguen ahí.
+Los tests no son decorativos: cubren específicamente las formas en que este
+sistema puede mentirle al usuario, que es el único error grave que puede
+cometer una herramienta de monitoreo.
 
-`tests/setup.test.mjs` ejecuta el `schema.sql` **sentencia por sentencia**, que
-es como lo corre el driver de Neon en producción. Está separado a propósito: la
-primera versión de `/api/setup` tenía un bug que descartaba en silencio todos
-los `CREATE TABLE` (los que venían precedidos por un comentario), y no se
-detectó porque los otros tests ejecutan el schema completo de una sola vez con
-el cliente `pg`, sin pasar por esa lógica.
+- **Si la API falla, no se marca nada de baja.** Un error de red de un día no
+  debe generar un mail avisando que la competencia dio de baja 20
+  publicaciones que siguen ahí. Se verifica en tres niveles: el multiget que
+  falla, el orquestador, y la ingesta.
+- **Si no se pueden leer las cuotas, quedan en "desconocido", no en "no".**
+  Un `false` inventado dispararía una alerta falsa de "dejó de ofrecer
+  cuotas".
+- **Una baja real sí se detecta**, y también la reaparición.
+- `tests/setup.test.mjs` ejecuta el `schema.sql` **sentencia por sentencia**,
+  que es como lo corre el driver de Neon. Está separado a propósito: la
+  primera versión de `/api/setup` tenía un bug que descartaba en silencio
+  todos los `CREATE TABLE`, y no se detectó porque los otros tests ejecutan
+  el schema completo de una sola vez.
+- `tests/ml-api.test.mjs` levanta un servidor que imita a Mercado Libre
+  **incluyendo sus 403 reales**, así el código se prueba contra el
+  comportamiento verificado de la API y no contra su documentación, que está
+  desactualizada.
 
 ---
 
@@ -205,26 +241,27 @@ app/
   page.tsx                  El tablero
   login/page.tsx            Pantalla de contraseña
   api/
-    cron/scan/              El relevamiento diario (lo llama el cron)
-    scan-now/               Relevamiento a demanda (botón del tablero)
+    cron/scan/              El control diario (lo llama el cron de Vercel)
+    scan-now/               Control a demanda (botón del tablero)
+    watchlist/              Alta y baja de links; verifica contra ML al agregar
     ml/auth, ml/callback    Autorización con Mercado Libre (una sola vez)
-    ingest/                 Recibe un relevamiento externo, por si algún día
-                            querés cargar datos desde otra fuente
+    ml/diag                 Diagnóstico de qué endpoints responden
+    ingest/                 Recibe un relevamiento externo (por si algún día
+                            los datos vienen de otra fuente)
     setup/                  Crea las tablas
     listings, changes,      Datos para el tablero
-    history, stats,
-    watchlist
+    history, stats
 lib/
-  ml-api.ts                 Cliente de la API de ML: tokens, búsquedas
-  scan.ts                   Orquesta la corrida: lee el watchlist y releva
-  ingest-core.ts            Guarda todo y detecta cambios (SQL testeado)
+  ml-api.ts                 Cliente de ML: tokens, /items, cuotas, links → ID
+  scan.ts                   Orquesta el control: lee la lista y consulta ML
+  ingest-core.ts            Guarda todo y detecta cambios (el SQL testeado)
   diff.ts                   Las reglas de qué cuenta como cambio
   notify.ts                 El mail de alerta
-  db.ts                     Conexión a Postgres
   sql-split.ts              Parte el schema.sql en sentencias
+  db.ts                     Conexión a Postgres
   auth.ts                   Sesión del tablero
-db/schema.sql               Las tablas
-tests/                      72 tests
+db/schema.sql               Las tablas y las migraciones
+tests/                      90 tests
 vercel.json                 El horario del cron
 ```
 
@@ -232,21 +269,20 @@ vercel.json                 El horario del cron
 
 ## Cosas que conviene saber
 
-**El permiso de Mercado Libre vence a los 6 meses de inactividad.** Mientras el
-cron corra todos los días se renueva solo y no hay que hacer nada. Si por algún
-motivo estuviera parado más de 6 meses, hay que volver a entrar una vez a
-`/api/ml/auth`. Si eso pasa, el relevamiento falla con un mensaje que lo dice
+**El permiso de Mercado Libre vence a los 6 meses de inactividad.** Mientras
+el control corra todos los días se renueva solo. Si estuviera parado más de 6
+meses, hay que entrar una vez más a `/api/ml/auth`; el error lo dice
 explícitamente y queda registrado en el tablero.
 
-**La API devuelve como máximo 1000 posiciones por búsqueda.** Para marcas con
-catálogos enormes, si el tablero avisa que se llegó a ese tope, conviene
-dividir el seguimiento por vendedor en lugar de por marca.
+**Los precios son los de la publicación**, sin promociones bancarias. Las
+cuotas se registran aparte, porque cambian bastante la comparación real: en el
+relevamiento de agosto, el 58% de las publicaciones de Bubba mostraba cuotas.
 
-**Los precios que ves son los de la publicación, sin cuotas ni promociones
-bancarias.** El sistema registra aparte si la publicación ofrece cuotas, porque
-en el relevamiento de agosto el 58% de las publicaciones de Bubba las mostraba
-y eso cambia bastante la comparación real de precios.
-
-**Si un día el cron no corre, no se pierde nada** — la próxima corrida compara
+**Si un día el control no corre, no se pierde nada** — el próximo compara
 contra la última foto que tenga. Lo único que se pierde es el detalle de qué
 pasó exactamente en el medio.
+
+**Si el vendedor edita la publicación al punto de reemplazar el producto**, la
+app lo ve como un cambio de precio de la misma publicación, porque para
+Mercado Libre sigue siendo el mismo ID. Vale revisar de tanto en tanto que lo
+que seguís siga siendo lo que creés.

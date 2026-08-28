@@ -145,3 +145,9 @@ UPDATE watchlist SET active = FALSE WHERE kind IN ('brand', 'seller');
 -- Se guardan distinto porque se consultan con endpoints distintos.
 ALTER TABLE watchlist ADD COLUMN IF NOT EXISTS id_kind TEXT NOT NULL DEFAULT 'item';
 ALTER TABLE listings  ADD COLUMN IF NOT EXISTS id_kind TEXT NOT NULL DEFAULT 'item';
+
+-- Cantidad de ofertas compitiendo por una ficha de catalogo.
+-- Es una señal competitiva por si misma: si aparecen vendedores nuevos,
+-- el producto se puso mas peleado.
+ALTER TABLE listings        ADD COLUMN IF NOT EXISTS offers_count INT;
+ALTER TABLE price_snapshots ADD COLUMN IF NOT EXISTS offers_count INT;

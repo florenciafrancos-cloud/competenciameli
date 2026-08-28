@@ -56,7 +56,7 @@ export async function runScan(
   );
 
   const itemIds: string[] = [];
-  const productIds: string[] = [];
+  const productEntries: { id: string; url: string | null }[] = [];
   const unparsed: string[] = [];
   let legacyCount = 0;
 
@@ -69,13 +69,19 @@ export async function runScan(
         unparsed.push(row.value);
         continue;
       }
-      if (parsed.kind === "product") productIds.push(parsed.id.toUpperCase());
-      else itemIds.push(parsed.id.toUpperCase());
+      if (parsed.kind === "product") {
+        // El permalink de las fichas viene vacio en la API, asi que se
+        // conserva el link que pego el usuario para poder abrirlo.
+        productEntries.push({ id: parsed.id.toUpperCase(), url: row.value ?? null });
+      } else {
+        itemIds.push(parsed.id.toUpperCase());
+      }
     } else {
       legacyCount++;
     }
   }
 
+  const productIds = productEntries.map((p) => p.id);
   const trackedIds = [...itemIds, ...productIds];
 
   if (legacyCount > 0) {
@@ -117,8 +123,8 @@ export async function runScan(
     notFound.push(...r.notFound);
     report.warnings.push(...r.warnings);
   }
-  if (productIds.length > 0) {
-    const r = await fetchCatalogProducts([...new Set(productIds)], token);
+  if (productEntries.length > 0) {
+    const r = await fetchCatalogProducts(productEntries, token);
     listings.push(...r.listings);
     notFound.push(...r.notFound);
     report.warnings.push(...r.warnings);

@@ -24,6 +24,8 @@ export type ScrapedListing = {
   /** Estado en ML: active, paused, closed. */
   ml_status?: MlStatus | null;
   available_quantity?: number | null;
+  /** Cuantas ofertas compiten por esta ficha de catalogo. */
+  offers_count?: number | null;
 };
 
 /** Payload que recibe /api/ingest. */
@@ -66,7 +68,9 @@ export type ChangeType =
   | "paused"
   | "reactivated"
   | "out_of_stock"
-  | "back_in_stock";
+  | "back_in_stock"
+  | "new_competitor"
+  | "competitor_left";
 
 export type DetectedChange = {
   ml_id: string;
@@ -99,6 +103,7 @@ export type ListingRow = {
   status: string;
   ml_status: string | null;
   available_quantity: number | null;
+  offers_count: number | null;
   first_seen_at: string;
   last_seen_at: string;
   updated_at: string;
@@ -135,6 +140,8 @@ export const CHANGE_LABELS: Record<ChangeType, string> = {
   reactivated: "Reactivada",
   out_of_stock: "Sin stock",
   back_in_stock: "Volvió a tener stock",
+  new_competitor: "Entraron competidores",
+  competitor_left: "Se fueron competidores",
 };
 
 /** Orden en que se muestran los cambios: primero lo que más importa. */
@@ -151,5 +158,7 @@ export const CHANGE_ORDER: ChangeType[] = [
   "installments_removed",
   "installments_changed",
   "seller_change",
+  "new_competitor",
+  "competitor_left",
   "new_listing",
 ];

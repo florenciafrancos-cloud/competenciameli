@@ -40,6 +40,8 @@ const TONE: Partial<Record<ChangeType, string>> = {
   delisted: "text-up",
   paused: "text-up",
   out_of_stock: "text-up",
+  new_competitor: "text-up",
+  competitor_left: "text-down",
   relisted: "text-down",
   reactivated: "text-down",
   back_in_stock: "text-down",
@@ -264,7 +266,7 @@ export default function Home() {
           `${d.read_ok} publicaciones leídas`,
           `${d.changes_found} cambio${d.changes_found === 1 ? "" : "s"}`,
         ];
-        if (d.not_found > 0) parts.push(`${d.not_found} ya no existen`);
+        if (d.not_found > 0) parts.push(`${d.not_found} sin ofertas o dadas de baja`);
         if (d.first_run) parts.push("primera carga: no se envió mail");
         else if (d.email?.sent) parts.push("mail enviado");
         else if (d.email?.reason) parts.push(`mail: ${d.email.reason}`);
@@ -437,10 +439,12 @@ export default function Home() {
             Pegá el link de una publicación de la competencia en Mercado Libre.
             Todos los días se controla sola y te avisa por mail si cambia el
             precio, las cuotas, el vendedor, o si se pausa o se da de baja.
-            Sirven los dos tipos de link: el de un vendedor puntual
-            (<code>articulo.mercadolibre.com.ar/MLA-…</code>) y el de la ficha
-            de catálogo (<code>…/p/MLA…</code>), donde además te avisa cuando
-            cambia qué vendedor está ganando la venta.
+            <strong>Usá el link de la ficha del producto</strong> — la URL que
+            tiene <code>/p/</code> o <code>/up/</code>. Además del precio te
+            muestra todas las ofertas que compiten, quién tiene el mejor precio,
+            y te avisa cuando entra o sale un competidor. Mercado Libre no
+            permite leer publicaciones sueltas de otros vendedores, así que ese
+            es el camino que funciona.
           </p>
           <div className="flex gap-2 flex-wrap items-center text-[13px]">
             <input
@@ -662,6 +666,7 @@ export default function Home() {
                   <th style={{ textAlign: "right" }}>Lista</th>
                   <th style={{ textAlign: "right" }}>Precio</th>
                   <th style={{ textAlign: "right" }}>Desc.</th>
+                  <th style={{ textAlign: "right" }}>Ofertas</th>
                   <th>Cuotas</th>
                   <th>Estado</th>
                   <th>Visto</th>
@@ -716,6 +721,9 @@ export default function Home() {
                             ? `${Number(l.discount_pct).toFixed(0)}%`
                             : "—"}
                         </td>
+                        <td className="tabular text-right muted">
+                          {l.offers_count ?? "—"}
+                        </td>
                         <td className="muted text-[12px]">
                           {l.has_installments === null
                             ? "—"
@@ -739,7 +747,7 @@ export default function Home() {
                       </tr>
                       {openRow === l.ml_id && (
                         <tr>
-                          <td colSpan={8} className="subtle">
+                          <td colSpan={9} className="subtle">
                             <div className="p-2">
                               <div className="text-[11px] uppercase tracking-wide muted mb-2">
                                 Evolución de precio
@@ -767,10 +775,11 @@ export default function Home() {
             instante contra ML, así sabés en el momento si el link está bien.
           </p>
           <p className="muted text-[12px] mb-4 max-w-2xl">
-            <strong>Ficha de catálogo</strong> (<code>…/p/MLA…</code>): sigue la
-            oferta que está ganando, y avisa si cambia el vendedor.{" "}
-            <strong>Publicación</strong> (<code>articulo.…/MLA-…</code>): sigue a
-            ese vendedor puntual.
+            Pegá la URL de la <strong>ficha del producto</strong>: la que tiene{" "}
+            <code>/p/</code> o <code>/up/</code>. Sigue el mejor precio del
+            producto, quién lo tiene, y cuántos vendedores compiten. Los links de
+            publicaciones sueltas de otros vendedores no se pueden consultar:
+            Mercado Libre los bloquea.
           </p>
 
           <div className="flex gap-2 flex-wrap items-center mb-2 text-[13px]">

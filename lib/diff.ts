@@ -198,6 +198,28 @@ export function detectChanges(
       });
     }
 
+    // --- Competencia en la ficha de catalogo ---
+    // Que entren o salgan vendedores de un producto es informacion
+    // competitiva directa, incluso si el precio no se movio.
+    const prevOffers = prev.offers_count;
+    const newOffers = s.offers_count;
+    if (
+      prevOffers !== null &&
+      prevOffers !== undefined &&
+      newOffers !== null &&
+      newOffers !== undefined &&
+      prevOffers !== newOffers
+    ) {
+      changes.push({
+        ...base,
+        change_type: newOffers > prevOffers ? "new_competitor" : "competitor_left",
+        old_value: String(prevOffers),
+        new_value: String(newOffers),
+        delta_abs: newOffers - prevOffers,
+        delta_pct: null,
+      });
+    }
+
     // --- Cuotas ---
     const prevInst = prev.has_installments;
     const newInst = s.has_installments;

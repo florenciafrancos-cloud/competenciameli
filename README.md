@@ -4,15 +4,15 @@ Pegás los links de las publicaciones de la competencia que te importan.
 Una vez por día la app las revisa una por una y te avisa por mail si algo
 cambió.
 
-Detecta, para cada publicación que sigas:
+Detecta, para cada producto que sigas:
 
-- **Precio** (con el monto y el porcentaje del cambio)
-- **Cuotas** — si empieza, deja de ofrecerlas, o cambian las condiciones (6 → 12)
-- **Vendedor** — si la publicación pasa a manos de otro
-- **Pausas y bajas** — si el vendedor la pausa, la cierra, o la borra
-- **Stock** — si se queda sin stock o vuelve a tenerlo
+- **Precio** — el mejor precio del producto, con monto y porcentaje del cambio
+- **Vendedor ganador** — cuando otro vendedor pasa a tener el mejor precio
+- **Competencia** — cuando entra o sale un vendedor de ese producto
+- **Bajas** — cuando el producto se queda sin ofertas activas
+- **Cuotas y stock** — cuando el dato está disponible (ver más abajo)
 
-Y guarda el historial de precios de cada una, para ver la evolución.
+Y guarda el historial de precios, para ver la evolución.
 
 ---
 
@@ -21,26 +21,49 @@ Y guarda el historial de precios de cada una, para ver la evolución.
 Esto importa entenderlo, porque define la forma de la herramienta.
 
 **Mercado Libre cerró la búsqueda pública de su API** para aplicaciones no
-certificadas. Verificado el 28/08/2026 contra la API real, con un token válido:
+certificadas, **y también el detalle de publicaciones de otros vendedores.**
+Verificado el 28/08/2026 contra la API real, con un token válido:
 
 | Endpoint | Resultado |
 |---|---|
-| `/sites/MLA/search?q=...` (buscar por marca) | **403 forbidden** |
-| `/sites/MLA/search?seller_id=...` (por vendedor) | **403 forbidden** |
-| `/highlights/MLA/category/...` (destacados) | **403 forbidden** |
-| `/items?ids=...` (detalle de publicaciones) | **200 OK** |
-| `/items/{id}` | **200 OK** |
-| `/products/search` | **200 OK** |
-| `/products/{id}` (ficha de catálogo) | sin verificar — usá `/api/ml/diag?product=...` |
+| `/sites/MLA/search?q=...` (buscar por marca) | **403** `forbidden` |
+| `/sites/MLA/search?seller_id=...` | **403** `forbidden` |
+| `/highlights/MLA/category/...` | **403** `forbidden` |
+| `/items/{id de otro vendedor}` | **403** `access_denied` |
+| `/items?ids={id de otro vendedor}` | 200 en el sobre, **`code: 403`** adentro |
+| `/items/{id propio}` | 200 OK |
+| `/products/{catalog_id}` | **200 OK** |
+| `/products/{catalog_id}/items` | **200 OK** — todas las ofertas que compiten |
+| `/products/search` | 200 OK |
 
 Tampoco sirve leer las páginas de Mercado Libre directamente: bloquea la
 navegación automatizada — las páginas de resultados devuelven el cascarón sin
 las publicaciones, y redirigen a una pantalla de verificación anti-bots.
 
-**Consecuencia:** la app **no descubre** publicaciones nuevas de una marca.
-Vos le decís qué seguir, pegando links. Eso es exactamente lo que `/items`
-permite hacer, y funciona bien: seguir 50 publicaciones de la competencia es
-un solo pedido cada 20 publicaciones.
+**Consecuencia, y es la que define la herramienta:** no se puede seguir la
+publicación de un vendedor puntual, pero **sí se puede seguir la ficha de
+catálogo del producto**. Y eso resulta mejor: `/products/{id}/items` devuelve
+*todas* las ofertas que compiten por ese producto, cada una con su vendedor y
+su precio. De ahí sale el mejor precio del mercado, quién lo tiene, y cuántos
+están peleándolo.
+
+> Una advertencia sobre cómo verificar esto. Probar `/items/MLA1` (un ID
+> inventado) devuelve 404 y parece indicar que el endpoint está disponible.
+> No lo indica: con un ID **real de otro vendedor** devuelve 403. Un 404 sobre
+> algo que no existe no dice nada sobre el permiso para leer algo que sí
+> existe. `/api/ml/diag` acepta `?item=` y `?product=` justamente para
+> probar con IDs reales.
+
+### Detalles de la respuesta real de catálogo
+
+- `buy_box_winner` puede venir en **null**: el ganador se calcula como la
+  oferta más barata de la lista.
+- `permalink` viene **vacío**: se conserva el link que pegó el usuario.
+- La lista de ofertas **no trae stock ni precio de lista**.
+- Las **cuotas no se pueden leer** en fichas de catálogo, porque requieren el
+  detalle de la publicación ganadora, que es de otro vendedor y está
+  bloqueado. La app lo deja en "desconocido" y lo avisa, en vez de inventar
+  un "no ofrece cuotas".
 
 ---
 
@@ -150,15 +173,16 @@ Pestaña **Qué se monitorea**:
 
 - **Agregar**: pegás el link y listo.
 
-Mercado Libre tiene **dos clases de link**, y la app las trata distinto porque
-son cosas distintas:
+Mercado Libre tiene tres formas de URL, y la app las resuelve así:
 
-| Link | Qué sigue |
+| Link | Se sigue como |
 |---|---|
-| `articulo.mercadolibre.com.ar/MLA-1234567890-...` | La publicación de **un vendedor puntual** |
-| `mercadolibre.com.ar/.../p/MLA67012657` | La **ficha de catálogo**: sigue la oferta que está ganando la venta, y avisa cuando **cambia el vendedor ganador** |
-| `mercadolibre.com.ar/.../up/MLAU4195231986?product_trigger_id=MLA74954916` | Igual que el anterior: se usa el `product_trigger_id`, porque el ID `MLAU…` no es consultable |
-| Cualquiera de los anteriores con `?wid=MLA…` | La publicación puntual que indica el `wid` |
+| `mercadolibre.com.ar/.../p/MLA67012657` | Ficha de catálogo ✅ |
+| `mercadolibre.com.ar/.../up/MLAU…?product_trigger_id=MLA74954916` | Ficha de catálogo (usa el `product_trigger_id`) ✅ |
+| `articulo.mercadolibre.com.ar/MLA-1234567890-...` | Publicación de un vendedor — **ML la bloquea**; la app intenta resolverla como ficha de catálogo y, si no puede, te explica qué link pegar |
+
+El `?wid=MLA…` que a veces traen las URLs de catálogo se ignora a propósito:
+apunta a la publicación de un vendedor, que está bloqueada.
 
 El orden en que se reconocen estos formatos importa, y fue la causa de un bug:
 buscar "el primer MLA seguido de números" en un link `/up/…` agarraba el
@@ -166,24 +190,12 @@ buscar "el primer MLA seguido de números" en un link `/up/…` agarraba el
 explicación. Ahora se resuelve por la **forma** de la URL, no por la primera
 coincidencia. Hay un test de regresión con la URL real que lo destapó.
 
-Para monitorear competencia, la ficha de catálogo suele ser más útil: te dice
-el mejor precio del mercado para ese producto y quién lo tiene. La publicación
-individual sirve cuando querés vigilar a un vendedor específico.
-
-Confundirlas daba un error muy poco claro ("no se encontró la publicación"),
-porque el ID de una ficha de catálogo no es una publicación. Ahora la app
-detecta cuál es cuál por la forma del link.
-
-> Al 28/08/2026 la documentación de ML no documenta los endpoints de catálogo.
-> El código prueba y se adapta: si `/products/{id}` responde con
-> `buy_box_winner` lo usa; si no, intenta `/products/{id}/items` y toma la
-> oferta más barata; si ninguno está habilitado, avisa que uses el link de un
-> vendedor puntual. `/api/ml/diag?product=MLA...` dice qué habilita tu token.
 - **Dejar de seguir**: un click. No se borra el historial: si la volvés a
   agregar, la serie de precios sigue estando.
 
-No hay límite práctico. Cada control agrupa las publicaciones en lotes de 20,
-que es el máximo por pedido que acepta la API.
+Cada ficha de catálogo son dos pedidos a la API (el producto y sus ofertas),
+así que seguir 50 productos son 100 pedidos por control: cómodo dentro de los
+límites.
 
 ---
 
@@ -231,7 +243,7 @@ cadena de conexión la saca de Vercel → Storage → tu base → `.env.local`).
 
 ### Tests
 
-Hay **106 tests**. Necesitan un Postgres local:
+Hay **113 tests**. Necesitan un Postgres local:
 
 ```bash
 npm test
@@ -291,7 +303,7 @@ lib/
   db.ts                     Conexión a Postgres
   auth.ts                   Sesión del tablero
 db/schema.sql               Las tablas y las migraciones
-tests/                      106 tests
+tests/                      113 tests
 vercel.json                 El horario del cron
 ```
 

@@ -88,24 +88,45 @@ let catalogMode = "ok"; // ok | no_winner | forbidden
 /** Fichas de catalogo "en ML". */
 const CATALOG = new Map();
 const CATALOG_OFFERS = new Map();
+/** Publicaciones de otros vendedores: ML las prohibe (403). */
+const FORBIDDEN_ITEMS = new Set();
 
 function putCatalog(id, over = {}) {
+  // Forma REAL de /products/{id}, verificada el 28/08/2026:
+  // buy_box_winner viene null y permalink vacio.
   CATALOG.set(id, {
     id,
-    name: `Bubba 52oz Keg ${id}`,
-    permalink: `https://www.mercadolibre.com.ar/bubba/p/${id}`,
+    catalog_product_id: id,
     status: "active",
-    attributes: [{ id: "BRAND", name: "Marca", value_name: "Bubba" }],
-    buy_box_winner: {
-      item_id: "MLA1000000700",
-      price: 84250,
-      original_price: null,
-      seller_id: 777,
-      available_quantity: 4,
-      currency_id: "ARS",
-    },
+    domain_id: "MLA-THERMAL_CUPS_AND_TUMBLERS",
+    permalink: "",
+    name: "Botella Termica Bubba Vaso Dual Sip 1.53 L Acero Inoxidable",
+    family_name: "Bubba Flora Aura Vaso",
+    type: "catalog_product",
+    buy_box_winner: null,
     ...over,
   });
+}
+
+/** Forma REAL de /products/{id}/items: sin stock ni precio de lista. */
+function putOffers(id, offers) {
+  CATALOG_OFFERS.set(
+    id,
+    offers.map((o) => ({
+      item_id: o.item_id,
+      site_id: "MLA",
+      seller_id: o.seller_id,
+      accepts_mercadopago: true,
+      price: o.price,
+      category_id: "MLA47752",
+      currency_id: "ARS",
+      warranty: "",
+      condition: "new",
+      listing_type_id: "gold_special",
+      international_delivery_mode: "none",
+      tier: "",
+    }))
+  );
 }
 
 const server = createServer((req, res) => {
@@ -163,7 +184,8 @@ const server = createServer((req, res) => {
     });
   }
 
-  // Multiget
+  // Multiget. OJO: para publicaciones de OTROS vendedores, ML devuelve 200
+  // en el sobre y { code: 403 } adentro. Verificado el 28/08/2026.
   if (url.pathname === "/items" && url.searchParams.has("ids")) {
     if (itemsEndpointStatus !== 200) {
       return json(itemsEndpointStatus, { message: "forbidden" });
@@ -172,6 +194,16 @@ const server = createServer((req, res) => {
     return json(
       200,
       ids.map((id) => {
+        if (FORBIDDEN_ITEMS.has(id)) {
+          return {
+            code: 403,
+            body: {
+              id,
+              error: "access_denied",
+              message: "Access to the requested resource is forbidden",
+            },
+          };
+        }
         const item = WORLD.get(id);
         return item
           ? { code: 200, body: item }
@@ -188,8 +220,11 @@ const server = createServer((req, res) => {
   if (prodItemsMatch) {
     if (catalogMode === "forbidden") return json(403, { message: "forbidden" });
     const offers = CATALOG_OFFERS.get(prodItemsMatch[1]);
-    if (!offers) return json(404, { error: "not_found" });
-    return json(200, { results: offers });
+    if (!offers) {
+      // Respuesta real de ML cuando la ficha existe pero nadie la vende.
+      return json(404, { message: "No winners found", error: "not_found", status: 404 });
+    }
+    return json(200, { results: offers, paging: { total: offers.length } });
   }
 
   const prodMatch = url.pathname.match(/^\/products\/(ML[A-Z]\d+)$/);
@@ -207,6 +242,13 @@ const server = createServer((req, res) => {
   // Detalle simple
   const itemMatch = url.pathname.match(/^\/items\/(ML[A-Z]\d+)$/);
   if (itemMatch) {
+    if (FORBIDDEN_ITEMS.has(itemMatch[1])) {
+      return json(403, {
+        message: "Access to the requested resource is forbidden",
+        error: "access_denied",
+        status: 403,
+      });
+    }
     const item = WORLD.get(itemMatch[1]);
     if (!item) return json(404, { error: "not_found", message: "not found" });
     return json(200, item);
@@ -279,11 +321,14 @@ await test("REGRESION: link /up/ toma el producto de catalogo, no el trigger com
   assert.deepEqual(r, { id: "MLA74954916", kind: "product" });
 });
 
-await test("en una pagina de catalogo, wid identifica la publicacion puntual", () => {
+await test("en una pagina de catalogo se usa la ficha, NO el wid", () => {
+  // ML prohibe leer publicaciones de terceros (403), asi que aunque el link
+  // traiga wid apuntando a una publicacion concreta, el camino consultable
+  // es la ficha de catalogo.
   const r = parseMlLink(
     "https://www.mercadolibre.com.ar/termo/p/MLA67012657?wid=MLA1234567890&quantity=1"
   );
-  assert.deepEqual(r, { id: "MLA1234567890", kind: "item" });
+  assert.deepEqual(r, { id: "MLA67012657", kind: "product" });
 });
 
 await test("un /up/ sin product_trigger_id no se puede resolver", () => {
@@ -469,45 +514,70 @@ await test("REGRESION: el ID de catalogo puede tener menos digitos", () => {
   });
 });
 
-await test("lee la ficha y toma la oferta ganadora (buy box)", async () => {
-  putCatalog("MLA67012657");
-  installmentsFor.set("MLA1000000700", { quantity: 12, amount: 7020, rate: 0 });
+await test("lee la ficha y calcula el ganador desde las ofertas", async () => {
+  // En la respuesta real buy_box_winner viene null: el ganador es la
+  // oferta mas barata de /products/{id}/items.
+  putCatalog("MLA74954916");
+  putOffers("MLA74954916", [
+    { item_id: "MLA2040738333", seller_id: 777, price: 63599 },
+    { item_id: "MLA2040738444", seller_id: 888, price: 71000 },
+    { item_id: "MLA2040738555", seller_id: 999, price: 84250 },
+  ]);
 
-  const r = await fetchCatalogProduct("MLA67012657", "T");
+  const r = await fetchCatalogProduct("MLA74954916", "T");
   assert.equal(r.ok, true);
-  assert.equal(r.listing.ml_id, "MLA67012657");
-  assert.equal(r.listing.price, 84250);
-  assert.equal(r.listing.seller, "TERMO_STYLE");
-  assert.equal(r.listing.brand, "Bubba");
-  assert.equal(r.winnerItemId, "MLA1000000700");
-  assert.match(r.listing.installments_text, /12 cuotas/);
+  assert.equal(r.listing.ml_id, "MLA74954916");
+  assert.equal(r.listing.price, 63599, "no tomo la oferta mas barata");
+  assert.equal(r.winnerItemId, "MLA2040738333");
+  assert.equal(r.listing.offers_count, 3);
+  assert.match(r.listing.title, /Bubba/);
 });
 
-await test("si la ficha no trae ganador, usa la oferta mas barata", async () => {
-  putCatalog("MLA67012658");
-  CATALOG_OFFERS.set("MLA67012658", [
-    { item_id: "MLA1000000801", price: 99000, seller_id: 777, available_quantity: 2 },
-    { item_id: "MLA1000000802", price: 79000, seller_id: 888, available_quantity: 5 },
-  ]);
-  catalogMode = "no_winner";
+await test("usa el link del usuario porque el permalink viene vacio", async () => {
+  const url = "https://www.mercadolibre.com.ar/botella/p/MLA74954916";
+  const r = await fetchCatalogProduct("MLA74954916", "T", { fallbackUrl: url });
+  assert.equal(r.listing.url, url);
+});
+
+await test("respeta buy_box_winner cuando ML si lo informa", async () => {
+  putCatalog("MLA74954917", {
+    buy_box_winner: { item_id: "MLA999", seller_id: 555, price: 55000, currency_id: "ARS" },
+  });
+  putOffers("MLA74954917", [{ item_id: "MLA888", seller_id: 888, price: 99000 }]);
+  const r = await fetchCatalogProduct("MLA74954917", "T");
+  assert.equal(r.listing.price, 55000);
+  assert.equal(r.winnerItemId, "MLA999");
+});
+
+await test("una ficha sin ofertas activas se explica, no se marca de baja", async () => {
+  putCatalog("MLA74954918");
+  CATALOG_OFFERS.delete("MLA74954918");
+  const r = await fetchCatalogProduct("MLA74954918", "T");
+  assert.equal(r.ok, false);
+  assert.match(r.error, /no tiene ofertas activas/);
+});
+
+await test("avisa que las cuotas no se pueden leer en fichas de catalogo", async () => {
+  pricesForbidden = true;
   try {
-    const r = await fetchCatalogProduct("MLA67012658", "T");
-    assert.equal(r.ok, true);
-    assert.equal(r.listing.price, 79000, "no tomo la mas barata");
-    assert.equal(r.winnerItemId, "MLA1000000802");
+    const r = await fetchCatalogProduct("MLA74954916", "T");
+    assert.equal(r.listing.has_installments, null, "inventó un valor de cuotas");
+    assert.ok(r.warnings.some((w) => /cuotas/.test(w)));
   } finally {
-    catalogMode = "ok";
+    pricesForbidden = false;
   }
 });
 
-await test("si ML no habilita catalogo, explica que usar el link del vendedor", async () => {
-  catalogMode = "forbidden";
+await test("si no se puede leer el vendedor, avisa y sigue", async () => {
+  sellersForbidden = true;
   try {
-    const r = await fetchCatalogProduct("MLA67012657", "T");
-    assert.equal(r.ok, false);
-    assert.match(r.error, /articulo\.mercadolibre\.com\.ar/);
+    const r = await fetchCatalogProduct("MLA74954916", "T");
+    assert.equal(r.ok, true);
+    assert.equal(r.listing.seller, null);
+    assert.equal(r.listing.seller_id, 777, "perdio el id, que es lo confiable");
+    assert.ok(r.warnings.some((w) => /vendedores/.test(w)));
   } finally {
-    catalogMode = "ok";
+    sellersForbidden = false;
   }
 });
 
@@ -518,14 +588,26 @@ await test("una ficha inexistente se reporta como no encontrada", async () => {
 });
 
 await test("CRITICO: si catalogo falla, no se reporta como no encontrada", async () => {
-  // Un 403 no significa que la ficha no exista: marcarla de baja seria mentir.
   catalogMode = "forbidden";
   try {
-    const r = await fetchCatalogProducts(["MLA67012657"], "T");
-    assert.equal(r.notFound.length, 0);
+    const r = await fetchCatalogProducts(["MLA74954916"], "T");
+    assert.equal(r.notFound.length, 0, "un 403 no significa que no exista");
     assert.equal(r.warnings.length, 1);
   } finally {
     catalogMode = "ok";
+  }
+});
+
+await test("los avisos repetidos se reportan una sola vez", async () => {
+  putCatalog("MLA74954919");
+  putOffers("MLA74954919", [{ item_id: "MLA777", seller_id: 777, price: 1000 }]);
+  pricesForbidden = true;
+  try {
+    const r = await fetchCatalogProducts(["MLA74954916", "MLA74954919"], "T");
+    const cuotas = r.warnings.filter((w) => /cuotas/.test(w));
+    assert.equal(cuotas.length, 1, `se repitio ${cuotas.length} veces`);
+  } finally {
+    pricesForbidden = false;
   }
 });
 
@@ -533,9 +615,35 @@ await test("CRITICO: si catalogo falla, no se reporta como no encontrada", async
 console.log("\n== Alta de una publicacion (previewItem) ==");
 
 await test("previewItem acepta una ficha de catalogo", async () => {
-  const r = await previewItem("MLA67012657", "T", "product");
+  const r = await previewItem("MLA74954916", "T", "product");
   assert.equal(r.ok, true);
-  assert.equal(r.listing.ml_id, "MLA67012657");
+  assert.equal(r.listing.ml_id, "MLA74954916");
+  assert.equal(r.kind, "product");
+});
+
+await test("si la publicacion esta prohibida, prueba como ficha de catalogo", async () => {
+  // Caso real: el usuario pega un link que parece publicacion, ML lo
+  // prohibe, pero el mismo ID tiene ficha de catalogo consultable.
+  FORBIDDEN_ITEMS.add("MLA74954916");
+  try {
+    const r = await previewItem("MLA74954916", "T", "item");
+    assert.equal(r.ok, true, "no intento el camino de catalogo");
+    assert.equal(r.kind, "product");
+  } finally {
+    FORBIDDEN_ITEMS.delete("MLA74954916");
+  }
+});
+
+await test("si esta prohibida y no hay ficha, explica que pegar el link /p/", async () => {
+  FORBIDDEN_ITEMS.add("MLA1692028243");
+  try {
+    const r = await previewItem("MLA1692028243", "T", "item");
+    assert.equal(r.ok, false);
+    assert.match(r.error, /publicaciones propias/);
+    assert.match(r.error, /\/p\//);
+  } finally {
+    FORBIDDEN_ITEMS.delete("MLA1692028243");
+  }
 });
 
 await test("verifica un link valido y devuelve el dato", async () => {
@@ -707,54 +815,71 @@ await test("una entrada de tipo marca avisa que ML cerro la busqueda", async () 
 });
 
 await test("sigue publicaciones y fichas de catalogo en la misma corrida", async () => {
-  putCatalog("MLA67012657");
+  putCatalog("MLA74954916");
+  putOffers("MLA74954916", [
+    { item_id: "MLA2040738333", seller_id: 777, price: 63599 },
+    { item_id: "MLA2040738444", seller_id: 888, price: 71000 },
+  ]);
   await q(
     `INSERT INTO watchlist (kind, value, label, ml_id, id_kind, active)
-     VALUES ('url', 'https://www.mercadolibre.com.ar/bubba/p/MLA67012657', 'Keg 52oz', 'MLA67012657', 'product', TRUE)
+     VALUES ('url', 'https://www.mercadolibre.com.ar/bubba/p/MLA74954916', 'Dual Sip 1.53L', 'MLA74954916', 'product', TRUE)
      ON CONFLICT (kind, value) DO UPDATE SET active = TRUE, id_kind = 'product'`
   );
   const r = await runScan(q, { runId: "s20" });
   assert.equal(r.error, undefined);
   assert.ok(r.read_ok >= 2, `solo leyo ${r.read_ok}`);
 
-  const res = await q(`SELECT price, seller FROM listings WHERE ml_id = 'MLA67012657'`);
-  assert.equal(Number(res.rows[0].price), 84250);
+  const res = await q(
+    `SELECT price, seller_id, offers_count, url FROM listings WHERE ml_id = 'MLA74954916'`
+  );
+  assert.equal(Number(res.rows[0].price), 63599);
+  assert.equal(Number(res.rows[0].seller_id), 777);
+  assert.equal(res.rows[0].offers_count, 2);
+  assert.match(res.rows[0].url, /mercadolibre/);
 });
 
-await test("detecta cuando cambia el VENDEDOR GANADOR de la ficha", async () => {
-  // La senal competitiva mas valiosa de una ficha de catalogo.
-  putCatalog("MLA67012657", {
-    buy_box_winner: {
-      item_id: "MLA1000000700",
-      price: 84250,
-      seller_id: 999,
-      available_quantity: 4,
-      currency_id: "ARS",
-    },
-  });
+await test("detecta cuando ENTRA un competidor nuevo a la ficha", async () => {
+  putOffers("MLA74954916", [
+    { item_id: "MLA2040738333", seller_id: 777, price: 63599 },
+    { item_id: "MLA2040738444", seller_id: 888, price: 71000 },
+    { item_id: "MLA2040738555", seller_id: 999, price: 68000 },
+  ]);
   const r = await runScan(q, { runId: "s21" });
   const c = r.ingest.changes.find(
-    (x) => x.ml_id === "MLA67012657" && x.change_type === "seller_change"
+    (x) => x.ml_id === "MLA74954916" && x.change_type === "new_competitor"
   );
-  assert.ok(c, "no detecto el cambio de vendedor ganador");
+  assert.ok(c, "no detecto el competidor nuevo");
+  assert.equal(c.old_value, "2");
+  assert.equal(c.new_value, "3");
 });
 
-await test("detecta cambio de precio en una ficha de catalogo", async () => {
-  putCatalog("MLA67012657", {
-    buy_box_winner: {
-      item_id: "MLA1000000700",
-      price: 71000,
-      seller_id: 999,
-      available_quantity: 4,
-      currency_id: "ARS",
-    },
-  });
+await test("detecta cuando otro vendedor pasa a tener el mejor precio", async () => {
+  // La señal competitiva mas valiosa de una ficha de catalogo.
+  putOffers("MLA74954916", [
+    { item_id: "MLA2040738333", seller_id: 777, price: 63599 },
+    { item_id: "MLA2040738555", seller_id: 999, price: 59900 },
+  ]);
   const r = await runScan(q, { runId: "s22" });
-  const c = r.ingest.changes.find(
-    (x) => x.ml_id === "MLA67012657" && x.change_type === "price_down"
+  const seller = r.ingest.changes.find(
+    (x) => x.ml_id === "MLA74954916" && x.change_type === "seller_change"
   );
-  assert.ok(c, "no detecto la baja de precio");
-  assert.equal(c.delta_abs, -13250);
+  const price = r.ingest.changes.find(
+    (x) => x.ml_id === "MLA74954916" && x.change_type === "price_down"
+  );
+  assert.ok(seller, "no detecto el cambio de vendedor ganador");
+  assert.ok(price, "no detecto la baja de precio");
+  assert.equal(price.delta_abs, -3699);
+});
+
+await test("detecta cuando SE VA un competidor", async () => {
+  putOffers("MLA74954916", [
+    { item_id: "MLA2040738555", seller_id: 999, price: 59900 },
+  ]);
+  const r = await runScan(q, { runId: "s23" });
+  const c = r.ingest.changes.find(
+    (x) => x.ml_id === "MLA74954916" && x.change_type === "competitor_left"
+  );
+  assert.ok(c, "no detecto que se fue un competidor");
 });
 
 await test("el historial de precios se acumula corrida a corrida", async () => {

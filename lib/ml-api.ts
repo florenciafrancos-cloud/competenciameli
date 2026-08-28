@@ -253,11 +253,10 @@ export function parseMlLink(input: string): ParsedMlLink | null {
 
   const isCatalogPage = /\/(p|up)\//i.test(text);
 
-  // En una pagina de catalogo, `wid` apunta a la publicacion concreta.
-  const wid = text.match(/[?&]wid=(ML[A-Z])-?(\d{6,})/i);
-  if (wid) {
-    return { id: `${wid[1].toUpperCase()}${wid[2]}`, kind: "item" };
-  }
+  // Nota: NO se usa el parametro `wid` aunque apunte a la publicacion
+  // concreta. Mercado Libre prohibe leer publicaciones de otros vendedores
+  // (403 access_denied), asi que en una pagina de catalogo el unico camino
+  // consultable es la ficha de catalogo.
 
   // Ficha de catalogo clasica: /p/MLA...
   const p = text.match(/\/p\/(ML[A-Z])-?(\d{4,})/i);
@@ -572,17 +571,38 @@ export async function fetchItems(
 export async function previewItem(
   mlId: string,
   token: string,
-  kind: MlLinkKind = "item"
+  kind: MlLinkKind = "item",
+  fallbackUrl: string | null = null
 ): Promise<
-  | { ok: true; listing: ScrapedListing }
+  | { ok: true; listing: ScrapedListing; kind: MlLinkKind }
   | { ok: false; error: string }
 > {
   if (kind === "product") {
-    const r = await fetchCatalogProduct(mlId, token);
-    return r.ok ? { ok: true, listing: r.listing } : { ok: false, error: r.error };
+    const r = await fetchCatalogProduct(mlId, token, { fallbackUrl });
+    return r.ok
+      ? { ok: true, listing: r.listing, kind: "product" }
+      : { ok: false, error: r.error };
   }
 
   const res = await mlFetch(`/items/${mlId}`, token);
+
+  // Mercado Libre prohibe leer publicaciones de otros vendedores. Cuando
+  // pasa, casi siempre el mismo producto tiene ficha de catalogo, que si
+  // se puede: la probamos antes de darnos por vencidos.
+  if (res.status === 403) {
+    const asProduct = await fetchCatalogProduct(mlId, token, { fallbackUrl });
+    if (asProduct.ok) {
+      return { ok: true, listing: asProduct.listing, kind: "product" };
+    }
+    return {
+      ok: false,
+      error:
+        `Mercado Libre no permite leer la publicación ${mlId}: solo deja consultar ` +
+        `publicaciones propias. Pegá en su lugar el link de la ficha del producto ` +
+        `(la URL que tiene /p/ o /up/), que sí se puede seguir y además te muestra ` +
+        `todas las ofertas que compiten.`,
+    };
+  }
   if (res.status === 404) {
     return {
       ok: false,
@@ -609,156 +629,232 @@ export async function previewItem(
   const nick = await sellers.nickname(item.seller_id);
   const inst = await fetchInstallments(mlId, token);
 
-  return { ok: true, listing: toListing(item, nick, inst) };
+  return { ok: true, listing: toListing(item, nick, inst), kind: "item" };
 }
 
 // ---------------------------------------------------------------
-// Fichas de catálogo (buy box)
+// Fichas de catálogo
 // ---------------------------------------------------------------
 
 /**
- * Datos de una ficha de catalogo: el producto y la oferta que esta ganando.
+ * VERIFICADO el 28/08/2026 contra la API real, con el token de Florencia:
  *
- * OJO: al 28/08/2026 la documentacion de Mercado Libre no documenta estos
- * endpoints, asi que el codigo prueba y se adapta:
- *   - si /products/{id} responde con buy_box_winner, lo usa
- *   - si no, intenta /products/{id}/items y toma la oferta mas barata
- *   - si ninguno responde, devuelve un error explicando que hay que usar
- *     el link de un vendedor puntual
+ *   /items/{id de otro vendedor}   -> 403 access_denied
+ *   /items?ids={id de otro}        -> 200 con { code: 403 } adentro
+ *   /products/{catalog_id}         -> 200 OK
+ *   /products/{catalog_id}/items   -> 200 OK, lista TODAS las ofertas
  *
- * Se prefiere no adivinar: `/api/ml/diag?product=...` dice cual de los dos
- * camimos habilita el token.
+ * O sea: las publicaciones de terceros estan cerradas, pero las fichas de
+ * catalogo no. Y la lista de ofertas trae, por cada vendedor que compite,
+ * su item_id, su seller_id y su precio. Eso es mejor que seguir una sola
+ * publicacion: da el mejor precio del producto, quien lo tiene, y cuantos
+ * estan compitiendo.
+ *
+ * Detalles de la respuesta real:
+ *   - `buy_box_winner` puede venir en null -> el ganador se calcula como la
+ *     oferta mas barata de la lista.
+ *   - `permalink` viene vacio -> se conserva el link que pego el usuario.
+ *   - la lista de ofertas NO trae stock ni precio de lista.
  */
+
+type CatalogOffer = {
+  item_id: string;
+  seller_id: number | null;
+  price: number;
+  currency_id?: string;
+  available_quantity?: number | null;
+  original_price?: number | null;
+  listing_type_id?: string;
+  condition?: string;
+};
+
 export type CatalogResult =
-  | { ok: true; listing: ScrapedListing; winnerItemId: string | null }
+  | {
+      ok: true;
+      listing: ScrapedListing;
+      winnerItemId: string | null;
+      offers: CatalogOffer[];
+      warnings: string[];
+    }
   | { ok: false; error: string; status: number };
+
+/** Normaliza una oferta de /products/{id}/items. */
+function toOffer(r: any): CatalogOffer | null {
+  const price = Number(r?.price);
+  if (!Number.isFinite(price) || price <= 0) return null;
+  return {
+    item_id: String(r.item_id ?? r.id ?? ""),
+    seller_id: r.seller_id ?? null,
+    price,
+    currency_id: r.currency_id,
+    available_quantity: r.available_quantity ?? null,
+    original_price: r.original_price ?? null,
+    listing_type_id: r.listing_type_id,
+    condition: r.condition,
+  };
+}
 
 export async function fetchCatalogProduct(
   productId: string,
-  token: string
+  token: string,
+  opts: { fallbackUrl?: string | null } = {}
 ): Promise<CatalogResult> {
+  const warnings: string[] = [];
+
   const prod = await mlFetch(`/products/${productId}`, token);
 
   if (prod.status === 404) {
     return {
       ok: false,
       status: 404,
-      error: `Mercado Libre no encontró el producto de catálogo ${productId}.`,
+      error: `Mercado Libre no encontró el producto de catálogo ${productId}. Revisá el link.`,
+    };
+  }
+  if (!prod.ok) {
+    return {
+      ok: false,
+      status: prod.status,
+      error:
+        `Mercado Libre respondió ${prod.status} al consultar el producto ${productId}: ` +
+        `${prod.text.slice(0, 200)}`,
     };
   }
 
-  if (prod.ok && prod.data) {
-    const winner = prod.data.buy_box_winner;
-    if (winner && (winner.price ?? 0) > 0) {
-      return {
-        ok: true,
-        winnerItemId: winner.item_id ?? null,
-        listing: await catalogToListing(productId, prod.data, winner, token),
-      };
-    }
+  const product = prod.data ?? {};
 
-    // Respondio, pero sin ganador declarado: probamos la lista de ofertas.
-    const items = await mlFetch(`/products/${productId}/items`, token);
-    if (items.ok && Array.isArray(items.data?.results)) {
-      const offers = items.data.results
-        .map((r: any) => ({
-          item_id: r.item_id ?? r.id,
-          price: r.price,
-          seller_id: r.seller_id,
-          available_quantity: r.available_quantity,
-        }))
-        .filter((o: any) => (o.price ?? 0) > 0)
-        .sort((a: any, b: any) => a.price - b.price);
+  // Las ofertas que compiten. Es la fuente del precio y del vendedor.
+  const itemsRes = await mlFetch(`/products/${productId}/items`, token);
 
-      if (offers.length > 0) {
-        return {
-          ok: true,
-          winnerItemId: offers[0].item_id ?? null,
-          listing: await catalogToListing(productId, prod.data, offers[0], token),
-        };
-      }
-    }
+  let offers: CatalogOffer[] = [];
+  if (itemsRes.ok && Array.isArray(itemsRes.data?.results)) {
+    offers = itemsRes.data.results
+      .map(toOffer)
+      .filter((o: CatalogOffer | null): o is CatalogOffer => o !== null)
+      .sort((a: CatalogOffer, b: CatalogOffer) => a.price - b.price);
+  } else if (itemsRes.status === 404) {
+    // "No winners found": el producto existe pero nadie lo esta vendiendo.
+    return {
+      ok: false,
+      status: 404,
+      error:
+        `El producto ${productId} existe en el catálogo pero no tiene ofertas activas ` +
+        `(Mercado Libre responde "No winners found"). No hay precio que seguir todavía.`,
+    };
+  } else {
+    warnings.push(
+      `No se pudo leer la lista de ofertas de ${productId}: ML respondió ${itemsRes.status}.`
+    );
+  }
 
+  // El ganador declarado por ML, si viene; si no, la oferta mas barata.
+  const declared = product.buy_box_winner;
+  const winner: CatalogOffer | null =
+    declared && Number(declared.price) > 0
+      ? toOffer(declared)
+      : offers.length > 0
+        ? offers[0]
+        : null;
+
+  if (!winner) {
     return {
       ok: false,
       status: 200,
       error:
-        `Mercado Libre devolvió la ficha de catálogo ${productId} pero sin ninguna oferta con precio. ` +
-        `Puede que el producto no tenga vendedores activos. Probá con el link de un vendedor puntual.`,
+        `Mercado Libre devolvió la ficha ${productId} pero sin ninguna oferta con precio. ` +
+        `Puede que no tenga vendedores activos en este momento.`,
     };
   }
 
-  // El endpoint de catalogo no esta habilitado para este token.
-  return {
-    ok: false,
-    status: prod.status,
-    error:
-      `Mercado Libre no permite consultar fichas de catálogo con este token ` +
-      `(respondió ${prod.status} en /products/${productId}). ` +
-      `Usá el link de un vendedor puntual: en la página del producto, entrá a la ` +
-      `oferta de un vendedor y copiá esa URL (empieza con articulo.mercadolibre.com.ar).`,
-  };
-}
-
-async function catalogToListing(
-  productId: string,
-  product: any,
-  winner: any,
-  token: string
-): Promise<ScrapedListing> {
+  // Nombre del vendedor y cuotas: son "si se puede". Si Mercado Libre no
+  // los habilita, se sigue igual con el resto en vez de fallar.
   const sellers = new SellerResolver(token);
-  const nick = await sellers.nickname(winner.seller_id);
+  const nick = await sellers.nickname(winner.seller_id ?? undefined);
+  if (sellers.unavailable) {
+    warnings.push(
+      "Mercado Libre no permite leer el nombre de los vendedores con este token: " +
+        "los cambios de vendedor se detectan igual, pero se muestran por número de vendedor."
+    );
+  }
 
-  const price = Number(winner.price);
-  const listPrice =
-    winner.original_price && winner.original_price > price
-      ? Number(winner.original_price)
-      : null;
-
-  // Las cuotas se consultan sobre la publicacion ganadora, no sobre el producto.
   const inst = winner.item_id
-    ? await fetchInstallments(String(winner.item_id), token)
+    ? await fetchInstallments(winner.item_id, token)
     : { has: null, text: null };
+  if (inst.has === null && winner.item_id) {
+    warnings.push(
+      "Las cuotas no se pueden leer en fichas de catálogo (Mercado Libre no habilita " +
+        "el detalle de publicaciones de terceros). El resto se sigue normalmente."
+    );
+  }
 
   const brandAttr = (product.attributes ?? []).find(
     (a: any) => a.id === "BRAND" || a.name?.toLowerCase() === "marca"
   );
 
-  return {
+  const listPrice =
+    winner.original_price && winner.original_price > winner.price
+      ? Number(winner.original_price)
+      : null;
+
+  const listing: ScrapedListing = {
     ml_id: productId,
     title: (product.name ?? productId).toString().trim(),
-    brand: (brandAttr?.value_name ?? "").toString().trim(),
-    url: product.permalink ?? null,
+    brand: (brandAttr?.value_name ?? guessBrand(product)).toString().trim(),
+    // El permalink de la ficha viene vacio: conservamos el link del usuario.
+    url: product.permalink?.trim() || opts.fallbackUrl || null,
     seller: nick,
     seller_id: winner.seller_id ?? null,
     official_store: null,
     list_price: listPrice,
-    price,
+    price: winner.price,
     discount_pct:
-      listPrice && listPrice > price
-        ? Number((((listPrice - price) / listPrice) * 100).toFixed(2))
+      listPrice && listPrice > winner.price
+        ? Number((((listPrice - winner.price) / listPrice) * 100).toFixed(2))
         : null,
     has_installments: inst.has,
     installments_text: inst.text,
     currency: winner.currency_id ?? "ARS",
     ml_status: product.status ?? null,
     available_quantity: winner.available_quantity ?? null,
+    offers_count: offers.length > 0 ? offers.length : null,
   };
+
+  return { ok: true, listing, winnerItemId: winner.item_id || null, offers, warnings };
+}
+
+/**
+ * La ficha no siempre trae el atributo Marca. El nombre del producto
+ * empieza por la marca en la practica ("Botella Termica Bubba Vaso..."),
+ * pero adivinar de ahi es fragil, asi que solo se usa `family_name` si esta.
+ */
+function guessBrand(product: any): string {
+  const fam = (product?.family_name ?? "").toString().trim();
+  if (!fam) return "";
+  return fam.split(/\s+/)[0] ?? "";
 }
 
 /** Consulta varias fichas de catalogo. */
 export async function fetchCatalogProducts(
-  productIds: string[],
+  products: (string | { id: string; url?: string | null })[],
   token: string
 ): Promise<FetchItemsResult> {
   const listings: ScrapedListing[] = [];
   const notFound: string[] = [];
   const warnings: string[] = [];
+  const seen = new Set<string>();
+  // Los avisos de "no se pueden leer las cuotas" y similares son iguales
+  // para todas las fichas: se reportan una sola vez.
+  const globalWarnings = new Set<string>();
 
-  for (const id of [...new Set(productIds)]) {
-    const r = await fetchCatalogProduct(id, token);
+  for (const entry of products) {
+    const id = (typeof entry === "string" ? entry : entry.id).toUpperCase();
+    if (seen.has(id)) continue;
+    seen.add(id);
+    const url = typeof entry === "string" ? null : entry.url ?? null;
+
+    const r = await fetchCatalogProduct(id, token, { fallbackUrl: url });
     if (r.ok) {
       listings.push(r.listing);
+      r.warnings.forEach((w) => globalWarnings.add(w));
     } else if (r.status === 404) {
       notFound.push(id);
     } else {
@@ -766,5 +862,5 @@ export async function fetchCatalogProducts(
     }
   }
 
-  return { listings, notFound, warnings };
+  return { listings, notFound, warnings: [...warnings, ...globalWarnings] };
 }

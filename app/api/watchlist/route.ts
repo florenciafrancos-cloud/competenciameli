@@ -93,7 +93,7 @@ export async function POST(req: Request) {
 
     // Verificamos contra Mercado Libre antes de guardar.
     const token = await getAccessToken(query);
-    const preview = await previewItem(mlId, token, parsed.kind);
+    const preview = await previewItem(mlId, token, parsed.kind, raw);
     if (!preview.ok) {
       return NextResponse.json({ error: preview.error }, { status: 400 });
     }
@@ -114,7 +114,9 @@ export async function POST(req: Request) {
         String(body?.label ?? l.title).slice(0, 300),
         body?.notes ?? null,
         mlId,
-        parsed.kind,
+        // previewItem puede resolver como ficha de catalogo algo que el
+        // link parecia publicacion: se guarda lo que realmente funciono.
+        preview.kind,
       ]
     );
 
@@ -134,7 +136,7 @@ export async function POST(req: Request) {
     return NextResponse.json({
       ok: true,
       ml_id: mlId,
-      kind: parsed.kind,
+      kind: preview.kind,
       listing: {
         title: l.title,
         price: l.price,
@@ -142,6 +144,7 @@ export async function POST(req: Request) {
         ml_status: l.ml_status,
         available_quantity: l.available_quantity,
         installments_text: l.installments_text,
+        offers_count: l.offers_count,
         url: l.url,
       },
     });

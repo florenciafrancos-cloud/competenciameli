@@ -99,6 +99,7 @@ export function normalizeListings(raw: unknown[]): {
       seller_id: numOrNull(r.seller_id),
       ml_status: r.ml_status ? String(r.ml_status).trim() : null,
       available_quantity: numOrNull(r.available_quantity),
+      offers_count: numOrNull(r.offers_count),
     });
   }
 
@@ -215,8 +216,8 @@ export async function runIngest(
            ml_id, title, brand, url, seller, official_store,
            list_price, price, discount_pct, has_installments,
            installments_text, currency, seller_id, ml_status,
-           available_quantity, status, last_seen_at, updated_at
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,
+           available_quantity, offers_count, status, last_seen_at, updated_at
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,
                    'active',NOW(),NOW())
          ON CONFLICT (ml_id) DO UPDATE SET
            title             = EXCLUDED.title,
@@ -235,6 +236,7 @@ export async function runIngest(
            seller_id         = COALESCE(EXCLUDED.seller_id, listings.seller_id),
            ml_status         = COALESCE(EXCLUDED.ml_status, listings.ml_status),
            available_quantity = COALESCE(EXCLUDED.available_quantity, listings.available_quantity),
+           offers_count      = COALESCE(EXCLUDED.offers_count, listings.offers_count),
            status            = 'active',
            last_seen_at      = NOW(),
            updated_at        = NOW()`,
@@ -254,14 +256,16 @@ export async function runIngest(
           l.seller_id ?? null,
           l.ml_status ?? null,
           l.available_quantity ?? null,
+          l.offers_count ?? null,
         ]
       );
 
       await q(
         `INSERT INTO price_snapshots (
            ml_id, run_id, list_price, price, discount_pct,
-           seller, has_installments, status, ml_status, available_quantity
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7,'active',$8,$9)`,
+           seller, has_installments, status, ml_status, available_quantity,
+           offers_count
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,'active',$8,$9,$10)`,
         [
           l.ml_id,
           runId,
@@ -272,6 +276,7 @@ export async function runIngest(
           l.has_installments,
           l.ml_status ?? null,
           l.available_quantity ?? null,
+          l.offers_count ?? null,
         ]
       );
     }

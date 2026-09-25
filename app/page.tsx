@@ -497,12 +497,14 @@ export default function Home() {
 
   return (
     <main className="max-w-[1200px] mx-auto px-5 py-8">
-      <header className="flex items-start justify-between gap-4 flex-wrap mb-6">
-        <div>
-          <h1 className="text-lg font-semibold tracking-tight">
-            Monitor de competencia — Mercado Libre
+      <header className="bg-black text-white rounded-lg px-5 py-4 flex items-start justify-between gap-4 flex-wrap mb-6">
+        <div className="w-full text-center">
+          <h1 className="text-[16px] font-bold tracking-tight">
+            MONITOR DE COMPETENCIA
           </h1>
-          <p className="muted text-[13px] mt-0.5">
+          {/* Sobre negro no sirve la clase `muted` (es casi negra): va
+              blanco al 70% para que baje de jerarquia sin desaparecer. */}
+          <p className="text-white/70 text-[13px] mt-0.5">
             {lastRun ? (
               <>
                 Último control: <strong>{fecha(lastRun.started_at)}</strong> ·{" "}
@@ -513,21 +515,21 @@ export default function Home() {
                 )}
               </>
             ) : (
-              "Todavía no se hizo ningún control."
+              ""
             )}
           </p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex gap-2 mx-auto">
           <button
             onClick={scanNow}
             disabled={scanning || activos.length === 0}
-            className="rounded-md bg-ink text-white px-3 py-1.5 text-[13px] disabled:opacity-40"
+            className="rounded-md bg-meli text-black font-medium px-3 py-1.5 text-[13px] disabled:opacity-40"
           >
             {scanning ? "Controlando…" : "Controlar ahora"}
           </button>
           <button
             onClick={load}
-            className="rounded-md border hairline px-3 py-1.5 text-[13px]"
+            className="rounded-md bg-meli text-black font-medium px-3 py-1.5 text-[13px]"
           >
             Actualizar
           </button>
@@ -536,7 +538,7 @@ export default function Home() {
               await fetch("/api/auth", { method: "DELETE" });
               location.href = "/login";
             }}
-            className="rounded-md border hairline px-3 py-1.5 text-[13px] muted"
+            className="rounded-md bg-meli text-black font-medium px-3 py-1.5 text-[13px]"
           >
             Salir
           </button>
@@ -1649,8 +1651,14 @@ function CandidateList({
 
 function Kpi({ label, value }: { label: string; value: string | number }) {
   return (
-    <div className="card p-3.5">
-      <div className="muted text-[11px] uppercase tracking-wide">{label}</div>
+    // Fondo negro con letras blancas, igual que el encabezado.
+    // No se usa la clase `card` a proposito: esa la comparten los paneles
+    // de aviso y las tablas, que siguen siendo claros.
+    <div className="bg-black text-white rounded-lg p-3.5">
+      {/* `muted` es casi negro: sobre negro no se leeria. */}
+      <div className="text-white/70 text-[11px] uppercase tracking-wide">
+        {label}
+      </div>
       <div className="text-2xl font-semibold tabular mt-1">{value}</div>
     </div>
   );

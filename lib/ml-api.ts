@@ -1126,6 +1126,11 @@ export async function resolveUserProduct(
     };
   }
 
+  const hint = hintedItemId(url);
+
+  // Con la publicacion exacta en la URL se revisan mas candidatos: cada uno
+  // cuesta una llamada, pero el premio es identificar la ficha con certeza
+  // en vez de preguntar.
   const rough: CatalogCandidate[] = search.data.results
     .filter((r: any) => r?.id && r?.name)
     .map((r: any) => ({
@@ -1134,9 +1139,7 @@ export async function resolveUserProduct(
       score: scoreName(String(r.name), words),
     }))
     .sort((a: CatalogCandidate, b: CatalogCandidate) => b.score - a.score)
-    .slice(0, 6);
-
-  const hint = hintedItemId(url);
+    .slice(0, hint ? 10 : 6);
 
   // Se consultan las ofertas de cada candidato UNA sola vez, y ese dato
   // sirve para tres cosas:
@@ -1187,6 +1190,34 @@ export async function resolveUserProduct(
         `variantes tiene ofertas activas: ninguna publicación de ese producto está ` +
         `participando del catálogo, que es lo único que la API deja consultar. ` +
         `Este producto no se puede seguir.`,
+    };
+  }
+
+  /**
+   * CASO IMPORTANTE: el link traia la publicacion exacta y NINGUNA ficha de
+   * catalogo la contiene.
+   *
+   * Eso significa que esa publicacion no participa del catalogo: es una
+   * publicacion suelta del vendedor. Mercado Libre no deja leer
+   * publicaciones ajenas (403), asi que no hay forma de seguirla.
+   *
+   * Antes, en esta situacion se mostraban igual los candidatos encontrados
+   * buscando por nombre. Eso es peor que no responder: son OTROS productos,
+   * parecidos de nombre, y elegir uno hubiera puesto a seguir el precio del
+   * producto equivocado sin que nadie se entere.
+   */
+  if (hint) {
+    return {
+      ok: false,
+      candidates: [],
+      error:
+        `Esa publicación (${hint}) no participa del catálogo de Mercado Libre: ` +
+        `es una publicación propia del vendedor, no una oferta compitiendo por una ` +
+        `ficha de producto. La API no permite leer publicaciones de otros vendedores, ` +
+        `así que este producto no se puede seguir. ` +
+        `Suele pasar con las publicaciones de tienda oficial que manejan sus propias ` +
+        `variantes. Si el mismo producto tiene una ficha con varios vendedores, ` +
+        `buscalo en Mercado Libre y pegá el link que tenga /p/ en la URL.`,
     };
   }
 

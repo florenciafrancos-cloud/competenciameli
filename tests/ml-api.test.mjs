@@ -826,7 +826,18 @@ await test("con el item_id de la URL elige el producto correcto entre variantes"
   assert.match(r.via, /item_id/);
 });
 
-await test("si el item_id no aparece en ninguna, vuelve a preguntar", async () => {
+await test("CRITICO: si el item_id no aparece en ninguna ficha, no ofrece parecidos", async () => {
+  // CAMBIO DE CRITERIO (25/09/2026). Antes esta situacion devolvia los
+  // candidatos encontrados por nombre para que la persona eligiera.
+  //
+  // En produccion eso resulto enganoso: Florencia pego el link de un termo
+  // de 1.1L de la tienda oficial y recibio "4 variantes que en la
+  // publicacion no existen" — eran otros productos de nombre parecido.
+  //
+  // Si la URL dice exactamente que publicacion es y ninguna ficha la
+  // contiene, la conclusion no es "elegi vos": es que esa publicacion no
+  // participa del catalogo y no se puede seguir. Ofrecer alternativas ahi
+  // invita a seguir el precio del producto equivocado.
   CATALOG_SEARCH.length = 0;
   CATALOG_SEARCH.push(
     { id: "MLA55550001", name: "Botella Termica Contigo 473ml Acero Inoxidable Autoseal Negro" },
@@ -834,7 +845,6 @@ await test("si el item_id no aparece en ninguna, vuelve a preguntar", async () =
   );
   putOffers("MLA55550001", [{ item_id: "MLA1111111111", seller_id: 1, price: 10000 }]);
   putOffers("MLA55550002", [{ item_id: "MLA2222222222", seller_id: 2, price: 20000 }]);
-  // ambos tienen ofertas -> no se puede auto-elegir sin el item_id
 
   const r = await resolveUserProduct(
     "MLAU4148053079",
@@ -842,7 +852,8 @@ await test("si el item_id no aparece en ninguna, vuelve a preguntar", async () =
     "T"
   );
   assert.equal(r.ok, false);
-  assert.equal(r.candidates.length, 2);
+  assert.deepEqual(r.candidates, []);
+  assert.match(r.error, /no participa del catálogo/i);
 });
 
 await test("no ofrece como opcion los productos sin ofertas activas", async () => {
@@ -1723,6 +1734,62 @@ await test("lee el numero de tienda oficial del link", () => {
 
 await test("sin tienda oficial en el link devuelve null", () => {
   assert.equal(hintedOfficialStore("https://www.mercadolibre.com.ar/x/p/MLA1"), null);
+});
+
+console.log("\n== Links /up/ de publicaciones que no estan en el catalogo ==");
+
+await test("CRITICO: con item_id en la URL y sin ficha que lo contenga, NO ofrece parecidos", async () => {
+  // Caso real (25/09/2026): link de la tienda oficial de Contigo, un termo
+  // de 1.1L. La publicacion MLA763804456 no participa de ninguna ficha.
+  // La version anterior mostraba 4 "variantes" que eran, en realidad, otros
+  // productos con nombre parecido. Elegir una hubiera puesto a seguir el
+  // precio del producto equivocado sin que nadie se entere.
+  CATALOG_SEARCH.length = 0;
+  CATALOG_SEARCH.push(
+    { id: "MLA70000010", name: "Termo Contigo Acero 1 Lts Inoxidable" },
+    { id: "MLA70000011", name: "Termo Contigo Acero 500 Ml Inoxidable" }
+  );
+  putCatalog("MLA70000010");
+  putCatalog("MLA70000011");
+  // Ambas fichas tienen ofertas, pero de OTRAS publicaciones.
+  putOffers("MLA70000010", [{ item_id: "MLA999000001", seller_id: 888, price: 90000, free_shipping: true }]);
+  putOffers("MLA70000011", [{ item_id: "MLA999000002", seller_id: 999, price: 70000, free_shipping: true }]);
+
+  const url =
+    "https://www.mercadolibre.com.ar/termo-contigo-acero-11-lts-acero-inoxidable-usa-design" +
+    "/up/MLAU263933157?pdp_filters=item_id%3AMLA763804456&wid=MLA763804456";
+
+  const r = await resolveUserProduct("MLAU263933157", url, await getAccessToken(q));
+  assert.equal(r.ok, false);
+  assert.deepEqual(r.candidates, [], "ofrecio productos que no son el pedido");
+  assert.match(r.error, /no participa del catálogo/i);
+  assert.match(r.error, /MLA763804456/);
+});
+
+await test("con item_id que SI esta en una ficha, la elige sin preguntar", async () => {
+  putOffers("MLA70000010", [
+    { item_id: "MLA763804456", seller_id: 555, price: 108139, free_shipping: true },
+    { item_id: "MLA999000001", seller_id: 888, price: 90000, free_shipping: true },
+  ]);
+  const url =
+    "https://www.mercadolibre.com.ar/termo-contigo-acero-11-lts-acero-inoxidable-usa-design" +
+    "/up/MLAU263933157?pdp_filters=item_id%3AMLA763804456";
+  const r = await resolveUserProduct("MLAU263933157", url, await getAccessToken(q));
+  assert.equal(r.ok, true);
+  assert.equal(r.productId, "MLA70000010");
+});
+
+await test("sin item_id en la URL sigue ofreciendo candidatos para elegir", async () => {
+  // El comportamiento viejo se mantiene cuando no hay con que desambiguar:
+  // ahi preguntar es lo correcto.
+  const url =
+    "https://www.mercadolibre.com.ar/termo-contigo-acero-inoxidable/up/MLAU263933157";
+  const r = await resolveUserProduct("MLAU263933157", url, await getAccessToken(q));
+  if (r.ok) {
+    assert.ok(r.productId, "resolvio a una ficha concreta");
+  } else {
+    assert.ok(r.candidates.length > 0, "no ofrecio nada para elegir");
+  }
 });
 
 // ---------------------------------------------------------------

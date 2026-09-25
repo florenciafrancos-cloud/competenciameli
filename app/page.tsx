@@ -189,12 +189,23 @@ export default function Home() {
     null
   );
 
-  // Lista de SKU propios, leida del Sheet publicado
-  const [skus, setSkus] = useState<
-    { sku: string; price: number | null; label?: string | null }[]
+  // Mis propias publicaciones en Mercado Libre, para asociar la mia a cada
+  // producto de la competencia que sigo.
+  const [myItems, setMyItems] = useState<
+    {
+      ml_id: string;
+      title: string;
+      price: number | null;
+      ml_status?: string | null;
+      url?: string | null;
+    }[]
   >([]);
-  const [skusError, setSkusError] = useState<string | null>(null);
-  const [newSku, setNewSku] = useState("");
+  const [myItemsError, setMyItemsError] = useState<string | null>(null);
+  const [mlAccount, setMlAccount] = useState<{
+    id: number;
+    nickname: string | null;
+  } | null>(null);
+  const [newOwn, setNewOwn] = useState("");
 
   // Prueba de cobertura: cuanto del catalogo propio se puede seguir
   const [covText, setCovText] = useState("");
@@ -221,12 +232,14 @@ export default function Home() {
       const lq = new URLSearchParams({ status: statusFilter });
       if (q) lq.set("q", q);
 
-      const [s, c, l, w, sk] = await Promise.all([
+      const [s, c, l, w, mi] = await Promise.all([
         fetch("/api/stats").then((r) => r.json()),
         fetch(`/api/changes?${cq}`).then((r) => r.json()),
         fetch(`/api/listings?${lq}`).then((r) => r.json()),
         fetch("/api/watchlist").then((r) => r.json()),
-        fetch("/api/skus").then((r) => r.json()).catch(() => ({ skus: [] })),
+        fetch("/api/my-items")
+          .then((r) => r.json())
+          .catch(() => ({ items: [] })),
       ]);
       if (s.error || c.error || l.error || w.error) {
         throw new Error(s.error || c.error || l.error || w.error);
@@ -235,8 +248,9 @@ export default function Home() {
       setChanges(c.changes ?? []);
       setListings(l.listings ?? []);
       setWatchlist(w.watchlist ?? []);
-      setSkus(sk?.skus ?? []);
-      setSkusError(sk?.error ?? null);
+      setMyItems(mi?.items ?? []);
+      setMyItemsError(mi?.error ?? null);
+      setMlAccount(mi?.account ?? null);
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
     } finally {
@@ -323,7 +337,7 @@ export default function Home() {
       const res = await fetch("/api/watchlist", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ value, sku: newSku || null }),
+        body: JSON.stringify({ value, own_url: newOwn || null }),
       });
       const d = await res.json();
       if (!res.ok) {
@@ -360,7 +374,7 @@ export default function Home() {
         body: JSON.stringify({
           product_id: productId,
           value: newLink.trim(),
-          sku: newSku || null,
+          own_url: newOwn || null,
         }),
       });
       const d = await res.json();
@@ -374,7 +388,7 @@ export default function Home() {
           }`,
         });
         setNewLink("");
-        setNewSku("");
+        setNewOwn("");
         setCandidates([]);
         load();
       }
@@ -385,13 +399,17 @@ export default function Home() {
     }
   }
 
-  /** Asocia un SKU a un producto que ya se está siguiendo. */
-  async function setSku(mlId: string, sku: string) {
-    await fetch("/api/watchlist/sku", {
+  /** Asocia MI publicación a un producto que ya se está siguiendo. */
+  async function setOwn(mlId: string, own: string) {
+    const res = await fetch("/api/watchlist/own", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ml_id: mlId, sku }),
+      body: JSON.stringify({ ml_id: mlId, own }),
     });
+    const d = await res.json().catch(() => ({}));
+    // Un error acá es silencioso por naturaleza (la fila simplemente no
+    // cambia), así que se muestra donde la persona está mirando.
+    if (!res.ok) setErr(d.error ?? "No se pudo asociar tu publicación.");
     load();
   }
 
@@ -606,8 +624,12 @@ export default function Home() {
               placeholder="Pegá acá la URL del producto en Mercado Libre"
               className="rounded-md border hairline bg-transparent px-3 py-2 w-full max-w-xl"
             />
-            {skus.length > 0 && (
-              <SkuSelect value={newSku} skus={skus} onChange={setNewSku} />
+            {myItems.length > 0 && (
+              <OwnItemSelect
+                value={newOwn}
+                items={myItems}
+                onChange={setNewOwn}
+              />
             )}
             <button
               onClick={addLink}
@@ -617,9 +639,9 @@ export default function Home() {
               {saving ? "Verificando…" : "Agregar"}
             </button>
           </div>
-          {skusError && (
+          {myItemsError && (
             <p className="muted text-[12px] mt-2">
-              Lista de SKU no disponible: {skusError}
+              No se pudieron leer tus publicaciones: {myItemsError}
             </p>
           )}
           {addMsg && (
@@ -754,7 +776,7 @@ export default function Home() {
                   <th>Publicación</th>
                   <th>Vendedor</th>
                   <th style={{ textAlign: "right" }}>Detalle</th>
-                  <th>Tu SKU</th>
+                  <th>Mi publicación</th>
                   <th style={{ textAlign: "right" }}>Tu precio</th>
                   <th style={{ textAlign: "right" }}>Diferencia</th>
                 </tr>
@@ -821,8 +843,23 @@ export default function Home() {
                         </span>
                       )}
                     </td>
-                    <td className="muted text-[12px] tabular whitespace-nowrap">
-                      {(c as any).sku ?? "—"}
+                    <td className="muted text-[12px] max-w-[220px]">
+                      {(c as any).own_title ? (
+                        (c as any).own_link ? (
+                          <a
+                            href={(c as any).own_link}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="hover:underline"
+                          >
+                            {(c as any).own_title}
+                          </a>
+                        ) : (
+                          (c as any).own_title
+                        )
+                      ) : (
+                        "—"
+                      )}
                     </td>
                     <td className="tabular text-right whitespace-nowrap">
                       {(c as any).own_price != null
@@ -860,7 +897,7 @@ export default function Home() {
                   <th style={{ textAlign: "right" }}>Precio</th>
                   <th style={{ textAlign: "right" }}>Desc.</th>
                   <th style={{ textAlign: "right" }}>Ofertas</th>
-                  <th>Tu SKU</th>
+                  <th>Mi publicación</th>
                   <th style={{ textAlign: "right" }}>Tu precio</th>
                   <th style={{ textAlign: "right" }}>Diferencia</th>
                   <th>Cuotas</th>
@@ -921,16 +958,16 @@ export default function Home() {
                           {l.offers_count ?? "—"}
                         </td>
                         <td onClick={(e) => e.stopPropagation()}>
-                          {skus.length > 0 ? (
-                            <SkuSelect
-                              value={(l as any).sku ?? ""}
-                              skus={skus}
-                              onChange={(v) => setSku(l.ml_id, v)}
+                          {myItems.length > 0 ? (
+                            <OwnItemSelect
+                              value={(l as any).own_ml_id ?? ""}
+                              items={myItems}
+                              onChange={(v) => setOwn(l.ml_id, v)}
                               compact
                             />
                           ) : (
                             <span className="muted text-[12px]">
-                              {(l as any).sku ?? "—"}
+                              {(l as any).own_title ?? "—"}
                             </span>
                           )}
                         </td>
@@ -1010,8 +1047,12 @@ export default function Home() {
               placeholder="Pegá acá la URL del producto en Mercado Libre"
               className="rounded-md border hairline bg-transparent px-3 py-2 w-full max-w-xl"
             />
-            {skus.length > 0 && (
-              <SkuSelect value={newSku} skus={skus} onChange={setNewSku} />
+            {myItems.length > 0 && (
+              <OwnItemSelect
+                value={newOwn}
+                items={myItems}
+                onChange={setNewOwn}
+              />
             )}
             <button
               onClick={addLink}
@@ -1021,9 +1062,9 @@ export default function Home() {
               {saving ? "Verificando…" : "Agregar"}
             </button>
           </div>
-          {skusError && (
+          {myItemsError && (
             <p className="muted text-[12px] mb-2">
-              Lista de SKU no disponible: {skusError}
+              No se pudieron leer tus publicaciones: {myItemsError}
             </p>
           )}
           {addMsg && (
@@ -1042,7 +1083,7 @@ export default function Home() {
               <thead>
                 <tr>
                   <th>Publicación</th>
-                  <th>Tu SKU</th>
+                  <th>Mi publicación</th>
                   <th style={{ textAlign: "right" }}>Último precio</th>
                   <th>Estado</th>
                   <th></th>
@@ -1070,15 +1111,22 @@ export default function Home() {
                           )}
                         </td>
                         <td>
-                          {skus.length > 0 ? (
-                            <SkuSelect
-                              value={w.sku ?? ""}
-                              skus={skus}
-                              onChange={(v) => setSku(w.ml_id, v)}
+                          {myItems.length > 0 ? (
+                            <OwnItemSelect
+                              value={w.own_ml_id ?? ""}
+                              items={myItems}
+                              onChange={(v) => setOwn(w.ml_id, v)}
                               compact
                             />
                           ) : (
-                            <span className="muted text-[12px]">{w.sku ?? "—"}</span>
+                            <span className="muted text-[12px]">
+                              {w.own_title ?? "—"}
+                            </span>
+                          )}
+                          {w.own_price != null && (
+                            <div className="muted text-[11px] tabular mt-1">
+                              mi precio: {money(w.own_price)}
+                            </div>
                           )}
                           <div className="muted text-[11px] tabular mt-1">
                             {w.ml_id} · {w.id_kind === "product" ? "catálogo" : "publicación"}
@@ -1319,34 +1367,71 @@ export default function Home() {
             {testMsg.text}
           </p>
         )}
+        {/*
+          Con qué cuenta de ML está conectada. Existe porque Mercado Libre
+          sólo deja leer las publicaciones de la cuenta que autorizó: si es
+          la equivocada, el buscador aparece vacío y no hay nada en pantalla
+          que explique por qué.
+        */}
+        <p className="mt-3">
+          {mlAccount ? (
+            <>
+              Conectado a Mercado Libre como{" "}
+              <strong>{mlAccount.nickname ?? mlAccount.id}</strong> ·{" "}
+              {myItems.length} publicación
+              {myItems.length === 1 ? "" : "es"} propia
+              {myItems.length === 1 ? "" : "s"}.{" "}
+              {myItems.length === 0 && (
+                <span className="text-up">
+                  Si tus publicaciones están en otra cuenta, entrá a Mercado
+                  Libre con esa cuenta en una ventana de incógnito y volvé a
+                  autorizar en <code>/api/ml/auth</code>.
+                </span>
+              )}
+            </>
+          ) : (
+            <>Mercado Libre: sin conexión verificada.</>
+          )}
+        </p>
       </footer>
     </main>
   );
 }
 
 /**
- * Buscador de SKU.
+ * Buscador de MIS publicaciones.
  *
- * Un <select> con 146 opciones es inusable: hay que escribir para encontrar.
- * Filtra por código y por nombre a la vez, porque a veces te acordás del
- * producto y no del código.
+ * Reemplaza al buscador de SKU. El motivo del cambio: el SKU obligaba a
+ * mantener una lista aparte y a que su precio coincidiera con el publicado.
+ * La lista de publicaciones viene de Mercado Libre, así que el precio que se
+ * compara es, por construcción, el que ve el comprador.
+ *
+ * Sigue siendo un buscador y no un <select>: son 135 publicaciones con
+ * títulos largos y parecidos entre sí. Filtra por título y por código, y
+ * acepta que le peguen el link de la publicación — es lo que uno tiene en
+ * el portapapeles cuando viene de mirarla en ML.
  */
-function SkuSelect({
+function OwnItemSelect({
   value,
-  skus,
+  items,
   onChange,
   compact,
 }: {
   value: string;
-  skus: { sku: string; price: number | null; label?: string | null }[];
-  onChange: (sku: string) => void;
+  items: {
+    ml_id: string;
+    title: string;
+    price: number | null;
+    ml_status?: string | null;
+  }[];
+  onChange: (ref: string) => void;
   compact?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [q, setQ] = useState("");
   const boxRef = useRef<HTMLDivElement>(null);
 
-  const chosen = skus.find((s) => s.sku === value);
+  const chosen = items.find((i) => i.ml_id === value);
 
   // Cerrar al hacer click afuera.
   useEffect(() => {
@@ -1362,16 +1447,20 @@ function SkuSelect({
 
   const needle = q.trim().toLowerCase();
   const matches = needle
-    ? skus.filter(
-        (s) =>
-          s.sku.toLowerCase().includes(needle) ||
-          (s.label ?? "").toLowerCase().includes(needle)
+    ? items.filter(
+        (i) =>
+          i.title.toLowerCase().includes(needle) ||
+          i.ml_id.toLowerCase().includes(needle)
       )
-    : skus;
+    : items;
   const shown = matches.slice(0, 60);
 
-  function pick(sku: string) {
-    onChange(sku);
+  // Si pegaron un link o un código que no está en la lista, se manda tal
+  // cual: el servidor lo valida contra ML y devuelve un error entendible.
+  const pegado = /ML[A-Z]|mercadolibre\./i.test(q.trim()) && shown.length === 0;
+
+  function pick(ref: string) {
+    onChange(ref);
     setOpen(false);
     setQ("");
   }
@@ -1382,25 +1471,25 @@ function SkuSelect({
         <button
           onClick={() => setOpen(true)}
           className={`rounded-md border hairline text-left ${
-            compact ? "px-2 py-1 text-[12px]" : "px-3 py-2 text-[13px]"
+            compact ? "px-2 py-1 text-[12px] max-w-[220px]" : "px-3 py-2 text-[13px] max-w-xs"
           }`}
         >
           {chosen ? (
-            <>
-              <span className="tabular">{chosen.sku}</span>
+            <span className="block truncate">
+              {chosen.title}
               {chosen.price != null && (
                 <span className="muted"> · {money(chosen.price)}</span>
               )}
-            </>
+            </span>
           ) : (
-            <span className="muted">Buscar SKU…</span>
+            <span className="muted">Elegí mi publicación…</span>
           )}
         </button>
         {chosen && (
           <button
             onClick={() => onChange("")}
             className="muted text-[12px]"
-            title="Quitar el SKU"
+            title="Desasociar mi publicación"
           >
             ×
           </button>
@@ -1417,42 +1506,61 @@ function SkuSelect({
         onChange={(e) => setQ(e.target.value)}
         onKeyDown={(e) => {
           if (e.key === "Escape") setOpen(false);
-          if (e.key === "Enter" && shown.length > 0) pick(shown[0].sku);
+          if (e.key === "Enter") {
+            if (shown.length > 0) pick(shown[0].ml_id);
+            else if (pegado) pick(q.trim());
+          }
         }}
-        placeholder="Código o nombre…"
+        placeholder="Nombre, código o link…"
         className={`rounded-md border hairline bg-transparent ${
-          compact ? "px-2 py-1 text-[12px] w-44" : "px-3 py-2 text-[13px] w-64"
+          compact ? "px-2 py-1 text-[12px] w-56" : "px-3 py-2 text-[13px] w-72"
         }`}
       />
       <div
-        className="absolute z-20 mt-1 w-80 max-h-72 overflow-y-auto card shadow-lg"
+        className="absolute z-20 mt-1 w-96 max-h-72 overflow-y-auto card shadow-lg"
         style={{ boxShadow: "0 8px 24px rgba(0,0,0,.12)" }}
       >
         {shown.length === 0 ? (
-          <p className="muted text-[12px] p-3">Ningún SKU coincide con “{q}”.</p>
+          pegado ? (
+            <button
+              onClick={() => pick(q.trim())}
+              className="w-full text-left px-3 py-2 text-[12px] hover:bg-black/[.04]"
+            >
+              Usar lo que pegaste y verificarlo en Mercado Libre
+            </button>
+          ) : (
+            <p className="muted text-[12px] p-3">
+              Ninguna publicación tuya coincide con “{q}”.
+            </p>
+          )
         ) : (
           <>
             <button
               onClick={() => pick("")}
               className="w-full text-left px-3 py-2 text-[12px] muted hover:bg-black/[.04]"
             >
-              — sin SKU —
+              — sin publicación propia —
             </button>
-            {shown.map((s) => (
+            {shown.map((i) => (
               <button
-                key={s.sku}
-                onClick={() => pick(s.sku)}
+                key={i.ml_id}
+                onClick={() => pick(i.ml_id)}
                 className={`w-full text-left px-3 py-2 text-[12px] hover:bg-black/[.04] ${
-                  s.sku === value ? "subtle" : ""
+                  i.ml_id === value ? "subtle" : ""
                 }`}
               >
                 <div className="flex items-baseline justify-between gap-2">
-                  <span className="tabular font-medium">{s.sku}</span>
+                  <span className="font-medium">{i.title}</span>
                   <span className="muted tabular whitespace-nowrap">
-                    {s.price != null ? money(s.price) : "sin precio"}
+                    {i.price != null ? money(i.price) : "sin precio"}
                   </span>
                 </div>
-                {s.label && <div className="muted">{s.label}</div>}
+                <div className="muted tabular text-[11px]">
+                  {i.ml_id}
+                  {i.ml_status && i.ml_status !== "active"
+                    ? ` · ${i.ml_status}`
+                    : ""}
+                </div>
               </button>
             ))}
             {matches.length > shown.length && (

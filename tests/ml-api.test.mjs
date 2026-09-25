@@ -33,7 +33,18 @@ import {
   slugWords,
   hintedItemId,
   checkCoverage,
+  fetchMe,
+  fetchOwnItems,
+  previewOwnItem,
+  fetchMyItemsFromMl,
 } from "../lib/ml-api";
+import {
+  diffAgainst,
+  resolveOwnRef,
+  getOwnItems,
+  resetOwnItemsCache,
+} from "../lib/own-items";
+import { getMyItems, resetMyItemsCache } from "../lib/my-items";
 import { runScan } from "../lib/scan";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -88,6 +99,12 @@ let installmentsFor = new Map(); // id -> {quantity, amount, rate} | null
 let itemsEndpointStatus = 200;
 let requestLog = [];
 let catalogMode = "ok"; // ok | no_winner | forbidden
+
+/** La cuenta que autorizo la app, y sus publicaciones. */
+const ME_ID = 331382454;
+let meForbidden = false;
+let myItemsStatus = 200;
+const MY_ITEMS = [];
 
 /** Fichas de catalogo "en ML". */
 const CATALOG = new Map();
@@ -167,6 +184,24 @@ const server = createServer((req, res) => {
   // Las busquedas estan cerradas, como en la realidad.
   if (url.pathname.endsWith("/search") && url.pathname.startsWith("/sites")) {
     return json(403, { message: "forbidden", error: "forbidden", status: 403 });
+  }
+
+  // Quien autorizo la app.
+  if (url.pathname === "/users/me") {
+    if (meForbidden) return json(403, { message: "forbidden" });
+    return json(200, { id: ME_ID, nickname: "IMPROMSA" });
+  }
+
+  // Mis propias publicaciones. VERIFICADO el 25/09/2026: este endpoint SI
+  // responde 200, a diferencia de /sites/MLA/search. Devuelve solo IDs.
+  const mineMatch = url.pathname.match(/^\/users\/(\d+)\/items\/search$/);
+  if (mineMatch) {
+    if (Number(mineMatch[1]) !== ME_ID) return json(403, { message: "forbidden" });
+    if (myItemsStatus !== 200) return json(myItemsStatus, { message: "error" });
+    const limit = Number(url.searchParams.get("limit") ?? 50);
+    const offset = Number(url.searchParams.get("offset") ?? 0);
+    const page = MY_ITEMS.slice(offset, offset + limit);
+    return json(200, { results: page, paging: { total: MY_ITEMS.length, limit, offset } });
   }
 
   // Nombre del vendedor
@@ -1215,6 +1250,230 @@ await test("el historial de precios se acumula corrida a corrida", async () => {
     `SELECT COUNT(DISTINCT run_id)::int AS n FROM price_snapshots WHERE ml_id = 'MLA1000000100'`
   );
   assert.ok(res.rows[0].n >= 8, `solo ${res.rows[0].n} corridas`);
+});
+
+// ===============================================================
+// Mi publicacion propia (reemplaza al SKU del Sheet)
+// ===============================================================
+//
+// La regla que ordena todo este bloque, verificada contra la API real:
+// Mercado Libre deja leer LAS PUBLICACIONES DE LA CUENTA QUE AUTORIZO, y
+// nada mas. De ahi salen los tres casos que importan: anda, es de otra
+// cuenta, o no existe. Y de ahi sale que valga la pena listar las propias:
+// /users/{id}/items/search es de los pocos endpoints de busqueda abiertos.
+
+console.log("\n== Mi cuenta y mis publicaciones ==");
+
+// Mundo de prueba: tres publicaciones mias, una ajena.
+putItem("MLA2097403253", { title: "Botella termica Improm 1L", price: 68000, seller_id: ME_ID });
+putItem("MLA2097403254", { title: "Botella termica Improm 750ml", price: 52000, seller_id: ME_ID });
+putItem("MLA2097403255", { title: "Vaso termico Improm 470ml", price: 39000, seller_id: ME_ID, status: "paused" });
+MY_ITEMS.push("MLA2097403253", "MLA2097403254", "MLA2097403255");
+
+putItem("MLA9000000001", { title: "Termo de la competencia", price: 61000, seller_id: 999 });
+FORBIDDEN_ITEMS.add("MLA9000000001");
+
+await test("fetchMe identifica la cuenta conectada", async () => {
+  const me = await fetchMe(await getAccessToken(q));
+  assert.equal(me.id, ME_ID);
+  assert.equal(me.nickname, "IMPROMSA");
+});
+
+await test("lista MIS publicaciones con titulo y precio", async () => {
+  const items = await fetchMyItemsFromMl(await getAccessToken(q));
+  assert.equal(items.length, 3);
+  const uno = items.find((i) => i.ml_id === "MLA2097403253");
+  assert.equal(uno.price, 68000);
+  assert.equal(uno.title, "Botella termica Improm 1L");
+});
+
+await test("la lista viene ordenada alfabeticamente", async () => {
+  const items = await fetchMyItemsFromMl(await getAccessToken(q));
+  const titulos = items.map((i) => i.title);
+  assert.deepEqual(titulos, [...titulos].sort((a, b) => a.localeCompare(b, "es")));
+});
+
+await test("pagina cuando hay mas publicaciones que el limite", async () => {
+  // 250 publicaciones obligan a tres vueltas de /items/search (limit 100).
+  const extra = [];
+  for (let i = 0; i < 247; i++) {
+    const id = `MLA30000000${String(i).padStart(3, "0")}`;
+    putItem(id, { title: `Producto ${String(i).padStart(3, "0")}`, seller_id: ME_ID });
+    extra.push(id);
+  }
+  MY_ITEMS.push(...extra);
+  const items = await fetchMyItemsFromMl(await getAccessToken(q));
+  assert.equal(items.length, 250);
+  // Y se limpia para no ensuciar los tests siguientes.
+  MY_ITEMS.length = 3;
+  for (const id of extra) WORLD.delete(id);
+});
+
+await test("si /users/me falla, el error dice que hay que reautorizar", async () => {
+  meForbidden = true;
+  await assert.rejects(
+    () => fetchMyItemsFromMl("token"),
+    /autorizar/i,
+    "el mensaje tiene que decir que hay que volver a autorizar"
+  );
+  meForbidden = false;
+});
+
+console.log("\n== Leer mi precio (previewOwnItem) ==");
+
+await test("acepta una publicacion propia y devuelve su precio", async () => {
+  const r = await previewOwnItem("MLA2097403253", await getAccessToken(q));
+  assert.equal(r.ok, true);
+  assert.equal(r.listing.price, 68000);
+  assert.equal(r.listing.ml_status, "active");
+});
+
+await test("acepta una publicacion propia PAUSADA (el precio sigue siendo dato)", async () => {
+  const r = await previewOwnItem("MLA2097403255", await getAccessToken(q));
+  assert.equal(r.ok, true);
+  assert.equal(r.listing.ml_status, "paused");
+});
+
+await test("CRITICO: una publicacion de otra cuenta explica el problema real", async () => {
+  const r = await previewOwnItem("MLA9000000001", await getAccessToken(q));
+  assert.equal(r.ok, false);
+  // No alcanza con "403": el mensaje tiene que nombrar la causa (la cuenta)
+  // y decir a cual esta conectada, que es lo que costo un dia entero.
+  assert.match(r.error, /cuenta/i);
+  assert.match(r.error, /IMPROMSA/);
+  assert.match(r.error, /incógnito|autorizar/i);
+});
+
+await test("un ID inexistente dice que revise el link", async () => {
+  const r = await previewOwnItem("MLA2097400000", await getAccessToken(q));
+  assert.equal(r.ok, false);
+  assert.match(r.error, /no encontró/i);
+});
+
+console.log("\n== Resolver lo que la persona elige o pega ==");
+
+await test("acepta el ID que devuelve el buscador", async () => {
+  const r = await resolveOwnRef("MLA2097403253", await getAccessToken(q));
+  assert.equal(r.ok, true);
+  assert.equal(r.ml_id, "MLA2097403253");
+});
+
+await test("acepta el link de la publicacion, con guion incluido", async () => {
+  const r = await resolveOwnRef(
+    "https://articulo.mercadolibre.com.ar/MLA-2097403253-botella-termica-_JM",
+    await getAccessToken(q)
+  );
+  assert.equal(r.ok, true);
+  assert.equal(r.ml_id, "MLA2097403253");
+});
+
+await test("CRITICO: un link /up/MLAU explica que ese no es el codigo", async () => {
+  // Es el error real que se comio Florencia: pego MLAU5205662057 y ML
+  // devolvio 404 sin ninguna pista de por que.
+  const r = await resolveOwnRef(
+    "https://www.mercadolibre.com.ar/botella-termica/up/MLAU5205662057",
+    await getAccessToken(q)
+  );
+  assert.equal(r.ok, false);
+  assert.match(r.error, /página de producto/i);
+  assert.ok(!/404/.test(r.error), "no tiene que hablar de codigos HTTP");
+});
+
+await test("un link de ficha de catalogo tambien se distingue", async () => {
+  const r = await resolveOwnRef(
+    "https://www.mercadolibre.com.ar/termo/p/MLA74954916",
+    await getAccessToken(q)
+  );
+  assert.equal(r.ok, false);
+  assert.match(r.error, /ficha de catálogo/i);
+});
+
+await test("algo que no es ni link ni ID no rompe", async () => {
+  const r = await resolveOwnRef("mi termo azul", await getAccessToken(q));
+  assert.equal(r.ok, false);
+  assert.match(r.error, /buscador/i);
+});
+
+console.log("\n== Precio propio en lote y cache ==");
+
+await test("el multiget trae solo las propias y avisa de las ajenas", async () => {
+  const r = await fetchOwnItems(
+    ["MLA2097403253", "MLA2097403254", "MLA9000000001"],
+    await getAccessToken(q)
+  );
+  assert.equal(r.listings.length, 2);
+  assert.equal(r.warnings.length, 1);
+  assert.match(r.warnings[0], /otra cuenta/i);
+});
+
+await test("un ID que no existe se omite, no inventa precio", async () => {
+  const r = await fetchOwnItems(["MLA2097403253", "MLA2097400000"], await getAccessToken(q));
+  assert.equal(r.listings.length, 1);
+});
+
+await test("getOwnItems arma el mapa desde la watchlist", async () => {
+  resetOwnItemsCache();
+  await q(`UPDATE watchlist SET own_ml_id = NULL`);
+  await q(
+    `UPDATE watchlist SET own_ml_id = 'MLA2097403253' WHERE ml_id = 'MLA1000000100'`
+  );
+  const r = await getOwnItems(q);
+  assert.equal(r.map.get("MLA2097403253").price, 68000);
+});
+
+await test("la segunda llamada usa la cache y no vuelve a pegarle a ML", async () => {
+  requestLog = [];
+  const r = await getOwnItems(q);
+  assert.equal(r.cached, true);
+  assert.ok(
+    !requestLog.some((u) => u.startsWith("/items?ids=")),
+    `pego a ML igual: ${requestLog.join(" ")}`
+  );
+});
+
+await test("sin publicaciones asociadas devuelve vacio sin llamar a ML", async () => {
+  resetOwnItemsCache();
+  await q(`UPDATE watchlist SET own_ml_id = NULL`);
+  requestLog = [];
+  const r = await getOwnItems(q);
+  assert.equal(r.map.size, 0);
+  assert.equal(requestLog.length, 0);
+});
+
+await test("si ML falla, getMyItems conserva la ultima lista buena", async () => {
+  resetMyItemsCache();
+  const primera = await getMyItems(q);
+  assert.equal(primera.items.length, 3);
+
+  myItemsStatus = 500;
+  const segunda = await getMyItems(q, { force: true });
+  myItemsStatus = 200;
+
+  assert.equal(segunda.items.length, 3, "vacio la lista por un error puntual");
+  assert.ok(segunda.error, "no reporto el error");
+});
+
+console.log("\n== Diferencia de precio ==");
+
+await test("positivo = estas mas caro", () => {
+  assert.deepEqual(diffAgainst(68000, 63599), { diff_abs: 4401, diff_pct: 6.9 });
+});
+
+await test("negativo = estas mas barato", () => {
+  const d = diffAgainst(59900, 63599);
+  assert.ok(d.diff_pct < 0);
+});
+
+await test("CRITICO: sin precio propio no inventa una diferencia", () => {
+  assert.deepEqual(diffAgainst(null, 63599), { diff_abs: null, diff_pct: null });
+});
+
+await test("CRITICO: un precio de referencia 0 no da 100% ni infinito", () => {
+  assert.deepEqual(diffAgainst(68000, 0), { diff_abs: null, diff_pct: null });
+});
+
+await test("un precio de referencia no numerico tampoco", () => {
+  assert.deepEqual(diffAgainst(68000, Number.NaN), { diff_abs: null, diff_pct: null });
 });
 
 // ---------------------------------------------------------------

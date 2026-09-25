@@ -160,3 +160,30 @@ ALTER TABLE watchlist ADD COLUMN IF NOT EXISTS sku TEXT;
 -- En el historial sí se guarda el precio propio del momento, para que una
 -- comparación vieja siga significando lo mismo dentro de seis meses.
 ALTER TABLE price_snapshots ADD COLUMN IF NOT EXISTS own_price NUMERIC(12,2);
+
+-- ----------------------------------------------------------------
+-- v16: el precio propio pasa a salir de MI publicacion en Mercado
+-- Libre, no de un SKU del Sheet.
+--
+-- Por que: el SKU obligaba a mantener una lista aparte y a que el
+-- precio del Sheet coincidiera con el publicado. Leyendo la
+-- publicacion propia, el precio que se compara es exactamente el que
+-- ve el comprador.
+--
+-- Condicion: la API de ML solo deja leer publicaciones de la cuenta
+-- que autorizo la app (/items/{id ajeno} -> 403). Por eso se guarda
+-- tambien con que cuenta esta conectada.
+-- ----------------------------------------------------------------
+ALTER TABLE watchlist ADD COLUMN IF NOT EXISTS own_ml_id TEXT;
+ALTER TABLE watchlist ADD COLUMN IF NOT EXISTS own_url   TEXT;
+ALTER TABLE listings  ADD COLUMN IF NOT EXISTS own_ml_id TEXT;
+ALTER TABLE listings  ADD COLUMN IF NOT EXISTS own_url   TEXT;
+
+CREATE INDEX IF NOT EXISTS watchlist_own_ml_id_idx ON watchlist (own_ml_id);
+
+-- Que cuenta de Mercado Libre autorizo la app. Se muestra en el
+-- tablero: si el token es de una cuenta distinta a la que publica,
+-- las publicaciones propias dan 403 y sin este dato no se entiende
+-- por que.
+ALTER TABLE ml_tokens ADD COLUMN IF NOT EXISTS ml_user_id  BIGINT;
+ALTER TABLE ml_tokens ADD COLUMN IF NOT EXISTS ml_nickname TEXT;

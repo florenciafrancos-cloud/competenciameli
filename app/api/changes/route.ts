@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { sql } from "@/lib/db";
 import { ensureSchema } from "@/lib/ensure-schema";
-import { getSkuList } from "@/lib/skus";
+import { getOwnItems, diffAgainst } from "@/lib/own-items";
 import type { ChangeRow } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -24,10 +24,15 @@ export async function GET(req: Request) {
   const all = searchParams.get("all") === "1";
 
   try {
-    // Se trae el SKU desde listings: los cambios viejos quedaron guardados
-    // antes de que existiera la columna, así que se resuelve por join.
-    const res = await sql<ChangeRow & { sku: string | null; current_price: string | null }>`
-      SELECT c.*, l.sku, l.price AS current_price
+    // Mi publicación asociada se resuelve por join contra la watchlist: los
+    // cambios viejos quedaron guardados antes de que existiera la columna.
+    const res = await sql<
+      ChangeRow & { own_ml_id: string | null; current_price: string | null }
+    >`
+      SELECT c.*, l.price AS current_price,
+             (SELECT w.own_ml_id FROM watchlist w
+               WHERE w.ml_id = c.ml_id AND w.own_ml_id IS NOT NULL
+               ORDER BY w.active DESC, w.id DESC LIMIT 1) AS own_ml_id
       FROM changes c
       LEFT JOIN listings l ON l.ml_id = c.ml_id
       WHERE (${all} OR EXISTS (
@@ -41,8 +46,7 @@ export async function GET(req: Request) {
       LIMIT ${limit}
     `;
 
-    const { rows: skus } = await getSkuList();
-    const bySku = new Map(skus.map((s) => [s.sku.toUpperCase(), s]));
+    const own = await getOwnItems((t, p) => sql.query(t, p ?? []));
 
     const PRICE_CHANGES = new Set([
       "price_up",
@@ -52,8 +56,10 @@ export async function GET(req: Request) {
     ]);
 
     const changes = res.rows.map((c: any) => {
-      const own = c.sku ? bySku.get(String(c.sku).toUpperCase()) : undefined;
-      const ownPrice = own?.price ?? null;
+      const mine = c.own_ml_id
+        ? own.map.get(String(c.own_ml_id).toUpperCase())
+        : undefined;
+      const ownPrice = mine?.price ?? null;
 
       // Para un cambio de precio se compara contra el precio que quedó tras
       // ese cambio; para el resto, contra el precio actual del producto.
@@ -63,17 +69,20 @@ export async function GET(req: Request) {
         ? Number(c.current_price)
         : null;
 
-      const valid = ownPrice !== null && ref !== null && Number.isFinite(ref) && ref !== 0;
-
       return {
         ...c,
         own_price: ownPrice,
-        diff_abs: valid ? ownPrice - ref : null,
-        diff_pct: valid ? Number((((ownPrice - ref) / ref) * 100).toFixed(1)) : null,
+        own_title: mine?.title ?? null,
+        own_link: mine?.url ?? null,
+        ...diffAgainst(ownPrice, ref),
       };
     });
 
-    return NextResponse.json({ count: changes.length, changes });
+    return NextResponse.json({
+      count: changes.length,
+      changes,
+      own_warnings: own.warnings,
+    });
   } catch (err) {
     return NextResponse.json(
       { error: err instanceof Error ? err.message : String(err) },

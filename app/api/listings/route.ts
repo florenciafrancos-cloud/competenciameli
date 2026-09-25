@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { sql } from "@/lib/db";
 import { ensureSchema } from "@/lib/ensure-schema";
-import { getSkuList } from "@/lib/skus";
+import { getOwnItems, diffAgainst } from "@/lib/own-items";
 import type { ListingRow } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -31,7 +31,13 @@ export async function GET(req: Request) {
   try {
     const res = await sql<ListingRow & { snapshots: number }>`
       SELECT l.*,
-             (SELECT COUNT(*) FROM price_snapshots s WHERE s.ml_id = l.ml_id) AS snapshots
+             (SELECT COUNT(*) FROM price_snapshots s WHERE s.ml_id = l.ml_id) AS snapshots,
+             (SELECT w.own_ml_id FROM watchlist w
+               WHERE w.ml_id = l.ml_id AND w.own_ml_id IS NOT NULL
+               ORDER BY w.active DESC, w.id DESC LIMIT 1) AS own_ml_id,
+             (SELECT w.own_url FROM watchlist w
+               WHERE w.ml_id = l.ml_id AND w.own_ml_id IS NOT NULL
+               ORDER BY w.active DESC, w.id DESC LIMIT 1) AS own_url
       FROM listings l
       WHERE (${all} OR EXISTS (
               SELECT 1 FROM watchlist w
@@ -44,29 +50,35 @@ export async function GET(req: Request) {
       ORDER BY l.brand NULLS LAST, l.price ASC
       LIMIT ${limit}
     `;
-    // Se adjunta el precio propio leyendo el Sheet, para que actualizarlo
-    // ahí se refleje sin tocar la base.
-    const { rows: skus } = await getSkuList();
-    const bySku = new Map(skus.map((s) => [s.sku.toUpperCase(), s]));
+    // Mi precio sale de MI publicación en Mercado Libre, leída en vivo
+    // (caché de 5 min). Si cambio el precio en ML, el tablero lo refleja
+    // sin esperar a la corrida de mañana.
+    const own = await getOwnItems((t, p) => sql.query(t, p ?? []));
 
     const listings = res.rows.map((l: any) => {
-      const own = l.sku ? bySku.get(String(l.sku).toUpperCase()) : undefined;
-      const ownPrice = own?.price ?? null;
+      const mine = l.own_ml_id
+        ? own.map.get(String(l.own_ml_id).toUpperCase())
+        : undefined;
+      const ownPrice = mine?.price ?? null;
       const price = l.price !== null ? Number(l.price) : null;
+
       return {
         ...l,
         own_price: ownPrice,
+        own_title: mine?.title ?? null,
+        own_status: mine?.ml_status ?? null,
+        own_link: mine?.url ?? l.own_url ?? null,
         // Diferencia entre TU precio y el mejor de la competencia.
         // Positivo = estás más caro.
-        diff_abs: ownPrice !== null && price !== null ? ownPrice - price : null,
-        diff_pct:
-          ownPrice !== null && price !== null && price !== 0
-            ? Number((((ownPrice - price) / price) * 100).toFixed(1))
-            : null,
+        ...diffAgainst(ownPrice, price),
       };
     });
 
-    return NextResponse.json({ count: listings.length, listings });
+    return NextResponse.json({
+      count: listings.length,
+      listings,
+      own_warnings: own.warnings,
+    });
   } catch (err) {
     return NextResponse.json(
       { error: err instanceof Error ? err.message : String(err) },

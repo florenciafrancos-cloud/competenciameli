@@ -45,8 +45,15 @@ function describe(c: DetectedChange): string {
   }
 }
 
-/** Tu SKU y tu precio, por publicación seguida. */
-export type OwnPriceInfo = Map<string, { sku: string; price: number | null }>;
+/**
+ * Mi publicación y mi precio, por producto de la competencia seguido.
+ *
+ * `label` es el título de mi publicación en Mercado Libre. Antes era el SKU
+ * del Sheet; se cambió porque el precio ahora sale de la publicación, y
+ * mostrar el mismo nombre que ve el comprador evita tener que traducir un
+ * código mentalmente al leer el mail.
+ */
+export type OwnPriceInfo = Map<string, { label: string; price: number | null }>;
 
 /** "+6,9% arriba" / "−4,1% abajo", o vacío si no hay con qué comparar. */
 function ownComparison(
@@ -67,7 +74,7 @@ function ownComparison(
   const signo = arriba ? "+" : "";
   return (
     `<div style="color:${arriba ? "#c0392b" : "#1e8e5a"};font-size:12px;margin-top:2px">` +
-    `${escapeHtml(info.sku)}: ${fmtMoney(String(info.price))} · ` +
+    `${escapeHtml(info.label)}: ${fmtMoney(String(info.price))} · ` +
     `${signo}${pct.toFixed(1)}% ${arriba ? "estás arriba" : "estás abajo"}</div>`
   );
 }

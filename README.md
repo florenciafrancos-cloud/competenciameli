@@ -150,7 +150,7 @@ Y para comparar contra tus propios precios:
 
 | Variable | Qué es |
 |---|---|
-| `SHEET_CSV_URL` | URL de tu Google Sheet publicado como CSV (ver abajo) |
+| `SHEET_CSV_URL` | *(sin uso desde la v16)* Google Sheet publicado como CSV |
 | `SHEET_SKU_COL` | Columna del SKU. Default `A` |
 | `SHEET_PRICE_COL` | Columna del precio. Default `E` |
 | `SHEET_NAME_COL` | Columna del nombre, para reconocer el SKU en la lista. Default `B` |
@@ -246,42 +246,92 @@ límites.
 
 ---
 
-## Tus SKU y precios: comparar contra la competencia
+## Tu precio: comparar contra la competencia
 
-En el Sheet donde tenés tu catálogo: **Archivo → Compartir → Publicar en la
-web → elegí la hoja** (no "Todo el documento") **→ CSV → Publicar**. Copiá la
-URL y ponela en `SHEET_CSV_URL`.
+Cada producto de la competencia que seguís se puede asociar a **tu propia
+publicación en Mercado Libre**. El precio sale de ahí, en vivo: es
+exactamente el que ve el comprador.
 
-A partir de ahí, cuando agregás un producto podés **buscar tu SKU** — escribís
-el código o parte del nombre y filtra, porque un desplegable con 146 opciones
-no sirve para encontrar nada. El tablero muestra:
+Al agregar un producto (o después, desde la misma tabla) hay un buscador
+**"Elegí mi publicación"**: escribís parte del nombre y filtra sobre tus
+publicaciones reales, traídas de ML. También acepta que le pegues el link de
+la publicación.
 
-| Producto | Mejor precio ML | Tu SKU | Tu precio | Diferencia |
+| Producto | Mejor precio ML | Mi publicación | Mi precio | Diferencia |
 |---|---|---|---|---|
-| Bubba Dual Sip 1.53L | $63.599 | P02.015 | $68.000 | **+6,9% estás arriba** |
+| Bubba Dual Sip 1.53L | $63.599 | Botella térmica Improm 1L | $68.000 | **+6,9% estás arriba** |
 
 La misma comparación aparece en la pestaña **Cambios** y en el mail de alerta:
 cada aviso te dice qué hizo la competencia y dónde quedaste vos.
 
 > **Bajó el precio** · Bubba Dual Sip 1.53L
 > $63.599 → $59.900 (−5,8%)
-> P02.015: $68.000 · **+13,5% estás arriba**
+> Botella térmica Improm 1L: $68.000 · **+13,5% estás arriba**
 
-También se puede asignar o cambiar el SKU de un producto que ya venías
-siguiendo, desde la misma tabla.
+**El precio no se copia a la base**: se lee de ML cada vez (caché de 5
+minutos). Cambiás el precio en Mercado Libre y la comparación se recalcula
+sola.
 
-**El precio no se copia a la base**: se lee del Sheet cada vez (con caché de 5
-minutos). Actualizás el Sheet y la comparación se recalcula sola, sin tocar la
-app.
+### La condición que hay que entender
 
-Dos cosas que el código cuida acá, porque son las que harían que la
-comparación mienta:
+Mercado Libre **sólo deja leer las publicaciones de la cuenta que autorizó la
+app**. Verificado contra la API real:
 
-- **Un SKU sin precio queda como "sin precio", nunca como cero.** Un cero
+```
+/items/{id propio}   ->  200 OK
+/items/{id ajeno}    ->  403 access_denied
+```
+
+Por eso, si la app quedó autorizada con una cuenta y tus publicaciones están
+en otra, el buscador aparece **vacío**. No es un error de la app.
+
+**Cómo se arregla:** abrí una ventana de incógnito, entrá a Mercado Libre con
+la cuenta que tiene las publicaciones, y desde esa misma ventana abrí
+`/api/ml/auth`. Que la aplicación de desarrollador esté creada en otra cuenta
+no importa: lo que manda es con qué cuenta aceptás el permiso.
+
+El pie del tablero muestra siempre **a qué cuenta está conectada** y cuántas
+publicaciones propias encontró. Está ahí justamente para que este caso se vea
+en vez de tener que deducirlo.
+
+### Tres códigos que se parecen y no son lo mismo
+
+Es el error más fácil de cometer, porque Mercado Libre los muestra en lugares
+parecidos:
+
+| Código | Qué es | Sirve para "mi publicación" |
+|---|---|---|
+| `MLA2097403253` | tu publicación | **sí** |
+| `MLAU5205662057` | tu página de producto (`/up/`) | no — da 404 |
+| `MLA3548989` | la ficha de catálogo (`/p/`) | no — es la de la competencia |
+
+Con el buscador esto deja de importar: elegís por nombre. Si igual pegás uno
+de los otros dos, la app te dice cuál pegaste y qué hacer, en vez de devolver
+un 404 sin explicación.
+
+### Lo que el código cuida
+
+- **Sin precio propio, la diferencia queda vacía, nunca en cero.** Un cero
   inventado mostraría "estás 100% arriba".
-- **Si el Sheet deja de estar publicado**, Google devuelve una página de login
-  en lugar del CSV. La app detecta que recibió HTML, avisa, y conserva la
-  última lista buena en vez de parsear el HTML y generar SKUs inventados.
+- **Un precio de referencia en cero no produce un porcentaje.** Devuelve nada.
+- **Si ML falla al refrescar, se conserva la última lista buena.** Que no se
+  pueda refrescar no vacía el buscador.
+- **Una publicación de otra cuenta se reporta como tal**, con el nombre de la
+  cuenta conectada, no como un "403" pelado.
+
+### El método anterior (SKU + Google Sheet)
+
+Hasta la v15 el precio propio salía de un Google Sheet publicado como CSV,
+buscando por SKU. El código sigue en el proyecto (`lib/skus.ts`,
+`/api/skus`, variables `SHEET_*`) pero **no se usa**: el tablero ya no
+muestra el buscador de SKU.
+
+Se cambió porque el Sheet obligaba a mantener una lista aparte y a que su
+precio coincidiera con el publicado. Leyendo la publicación, eso no puede
+desincronizarse.
+
+Si alguna vez conviene volver, está a un cambio de import: `/api/listings` y
+`/api/changes` usan `getOwnItems` donde antes usaban `getSkuList`.
 
 ---
 
@@ -386,7 +436,9 @@ lib/
   diff.ts                   Las reglas de qué cuenta como cambio
   notify.ts                 El mail de alerta
   sql-split.ts              Parte el schema.sql en sentencias
-  skus.ts                   Lee tus SKU y precios del Sheet publicado
+  own-items.ts              Mi precio, leido de mi publicacion en ML
+  my-items.ts               La lista de mis publicaciones (para el buscador)
+  skus.ts                   [sin uso] Lee SKU y precios de un Sheet publicado
   db.ts                     Conexión a Postgres
   auth.ts                   Sesión del tablero
 db/schema.sql               Las tablas y las migraciones

@@ -20,7 +20,7 @@ import type { Query } from "./ingest-core";
  *
  * Subir SCHEMA_VERSION cuando se agrega algo a db/schema.sql.
  */
-const SCHEMA_VERSION = 9;
+const SCHEMA_VERSION = 10;
 
 /** Una vez por instancia del servidor, para no consultar la base de gusto. */
 let verifiedInThisInstance = false;

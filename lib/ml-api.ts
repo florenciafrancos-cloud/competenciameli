@@ -1190,3 +1190,236 @@ export async function checkCoverage(
       "así que no hay precio consultable",
   };
 }
+
+// ---------------------------------------------------------------
+// Mis propias publicaciones
+// ---------------------------------------------------------------
+
+/**
+ * POR QUE ESTO ES UN MODULO APARTE DE LA COMPETENCIA
+ * --------------------------------------------------
+ * Mercado Libre trata "mi publicacion" y "la publicacion del otro" como
+ * dos mundos distintos:
+ *
+ *   /items/{id propio}  -> 200 OK, con precio, stock y estado
+ *   /items/{id ajeno}   -> 403 access_denied
+ *
+ * Por eso el precio propio se lee directo de la publicacion (dato exacto,
+ * el mismo que ve el comprador) mientras que el de la competencia hay que
+ * sacarlo de la ficha de catalogo.
+ *
+ * La consecuencia practica, y la razon por la que existe `fetchMe`: si la
+ * app quedo autorizada con una cuenta distinta a la que publica, TODO esto
+ * devuelve 403. Sin decir con que cuenta esta conectada, ese error es
+ * indescifrable.
+ */
+
+export type MlAccount = {
+  id: number;
+  nickname: string | null;
+};
+
+/** Quien autorizo la app. */
+export async function fetchMe(token: string): Promise<MlAccount | null> {
+  const res = await mlFetch(`/users/me`, token);
+  if (!res.ok || !res.data?.id) return null;
+  return {
+    id: Number(res.data.id),
+    nickname: (res.data.nickname ?? "").toString().trim() || null,
+  };
+}
+
+export type OwnListing = {
+  ml_id: string;
+  title: string;
+  price: number;
+  currency: string;
+  /** active | paused | closed */
+  ml_status: string | null;
+  available_quantity: number | null;
+  url: string | null;
+  seller_id: number | null;
+};
+
+function toOwnListing(item: MlItem, fallbackUrl: string | null): OwnListing {
+  return {
+    ml_id: item.id,
+    title: (item.title ?? item.id).trim(),
+    price: item.sale_price?.amount ?? item.price ?? 0,
+    currency: item.currency_id ?? "ARS",
+    ml_status: item.status ?? null,
+    available_quantity: item.available_quantity ?? null,
+    url: item.permalink || fallbackUrl || null,
+    seller_id: item.seller_id ?? null,
+  };
+}
+
+/**
+ * Valida una publicacion propia antes de asociarla, y devuelve el dato
+ * para mostrarlo al instante.
+ *
+ * Los mensajes de error son largos a proposito: cada uno corresponde a una
+ * causa distinta y a una solucion distinta. "No se pudo" obligaria a
+ * adivinar cual de las tres es.
+ */
+export async function previewOwnItem(
+  mlId: string,
+  token: string,
+  fallbackUrl: string | null = null
+): Promise<
+  { ok: true; listing: OwnListing } | { ok: false; error: string }
+> {
+  const res = await mlFetch(`/items/${mlId}`, token);
+
+  if (res.status === 403 || res.status === 401) {
+    const me = await fetchMe(token);
+    const quien = me
+      ? `La app está conectada a la cuenta ${me.nickname ?? me.id}.`
+      : "No se pudo averiguar a qué cuenta está conectada la app.";
+    return {
+      ok: false,
+      error:
+        `Mercado Libre no deja leer la publicación ${mlId} con el permiso actual. ` +
+        `Solo se pueden leer las publicaciones de la cuenta que autorizó la app. ` +
+        `${quien} Si tus publicaciones están en otra cuenta, entrá a Mercado Libre ` +
+        `con esa cuenta (ventana de incógnito) y volvé a autorizar desde /api/ml/auth.`,
+    };
+  }
+  if (res.status === 404) {
+    return {
+      ok: false,
+      error:
+        `Mercado Libre no encontró la publicación ${mlId}. ` +
+        `Revisá el link: tiene que ser el de tu publicación, el que empieza con ` +
+        `articulo.mercadolibre.com.ar/MLA-...`,
+    };
+  }
+  if (!res.ok) {
+    return {
+      ok: false,
+      error: `Mercado Libre respondió ${res.status} al consultar ${mlId}: ${res.text.slice(0, 160)}`,
+    };
+  }
+
+  const item = res.data as MlItem;
+  const price = item.sale_price?.amount ?? item.price;
+  if (!price || price <= 0) {
+    return {
+      ok: false,
+      error:
+        `La publicación ${mlId} no tiene un precio consultable ` +
+        `(estado: ${item.status ?? "desconocido"}).`,
+    };
+  }
+
+  return { ok: true, listing: toOwnListing(item, fallbackUrl) };
+}
+
+/**
+ * Lee varias publicaciones propias de una, con el multiget (lotes de 20).
+ *
+ * A diferencia de `fetchItems`, aca un ID que no responde NO es una señal
+ * de nada: simplemente se omite. Esto no alimenta la deteccion de cambios,
+ * solo la columna "mi precio". Un error puntual tiene que dejar la fila
+ * sin comparacion, nunca inventar un precio ni marcar una baja.
+ */
+export async function fetchOwnItems(
+  ids: string[],
+  token: string
+): Promise<{ listings: OwnListing[]; warnings: string[] }> {
+  const unique = [...new Set(ids.map((i) => i.trim().toUpperCase()))].filter(
+    Boolean
+  );
+  const listings: OwnListing[] = [];
+  const warnings: string[] = [];
+
+  for (let i = 0; i < unique.length; i += 20) {
+    const batch = unique.slice(i, i + 20);
+    const res = await mlFetch(`/items?ids=${batch.join(",")}`, token);
+
+    if (!res.ok) {
+      warnings.push(
+        `No se pudieron leer tus publicaciones ${batch.join(", ")}: ML respondió ${res.status}.`
+      );
+      continue;
+    }
+
+    const entries: any[] = Array.isArray(res.data) ? res.data : [];
+    for (const entry of entries) {
+      const code = entry?.code;
+      const body = entry?.body;
+
+      // El multiget devuelve 200 en el sobre y el error real adentro.
+      if (code === 403) {
+        warnings.push(
+          `Tu publicación ${body?.id ?? entry?.id ?? ""} no se puede leer con ` +
+            `el permiso actual: es de otra cuenta de Mercado Libre.`
+        );
+        continue;
+      }
+      if (code !== 200 || !body?.id) continue;
+
+      const item = body as MlItem;
+      const price = item.sale_price?.amount ?? item.price;
+      if (!price || price <= 0) continue;
+
+      listings.push(toOwnListing(item, null));
+    }
+  }
+
+  return { listings, warnings };
+}
+
+/**
+ * Trae TODAS mis publicaciones con titulo y precio.
+ *
+ * Dos pasos porque la API los separa:
+ *   1. /users/{id}/items/search  -> solo los IDs (paginado)
+ *   2. /items?ids=...            -> el detalle, de a 20
+ *
+ * VERIFICADO el 25/09/2026 con la cuenta IMPROMSA: el paso 1 responde 200
+ * y reporta 135 publicaciones. Es de los pocos endpoints de busqueda que
+ * Mercado Libre deja abiertos, porque busca dentro de tu propia cuenta.
+ */
+export async function fetchMyItemsFromMl(token: string): Promise<OwnListing[]> {
+  const me = await fetchMe(token);
+  if (!me) {
+    throw new Error(
+      "No se pudo identificar la cuenta de Mercado Libre conectada. " +
+        "Volvé a autorizar la app en /api/ml/auth."
+    );
+  }
+
+  const ids: string[] = [];
+  const LIMIT = 100;
+  // Tope de seguridad: 50 paginas = 5000 publicaciones. Sin esto, una
+  // respuesta rara de ML podria dejar el bucle girando.
+  for (let page = 0; page < 50; page++) {
+    const res = await mlFetch(
+      `/users/${me.id}/items/search?limit=${LIMIT}&offset=${page * LIMIT}`,
+      token
+    );
+    if (!res.ok) {
+      if (page === 0) {
+        throw new Error(
+          `Mercado Libre respondió ${res.status} al listar tus publicaciones: ` +
+            `${res.text.slice(0, 160)}`
+        );
+      }
+      break;
+    }
+    const results: string[] = Array.isArray(res.data?.results)
+      ? res.data.results
+      : [];
+    ids.push(...results.map((r: any) => String(r).toUpperCase()));
+    const total = Number(res.data?.paging?.total ?? 0);
+    if (results.length < LIMIT || ids.length >= total) break;
+  }
+
+  if (ids.length === 0) return [];
+
+  const { listings } = await fetchOwnItems(ids, token);
+  // Alfabetico: el buscador filtra igual, pero abrirlo y ver una lista
+  // ordenada es mas facil de recorrer que el orden en que ML las devuelve.
+  return listings.sort((a, b) => a.title.localeCompare(b.title, "es"));
+}

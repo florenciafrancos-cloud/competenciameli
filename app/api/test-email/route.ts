@@ -59,7 +59,10 @@ export async function POST() {
   ];
 
   const own = new Map([
-    ["MLA00000000", { sku: "SKU-EJEMPLO", price: 68000 }],
+    [
+      "MLA00000000",
+      { label: "Botella térmica Improm 1L (publicación de ejemplo)", price: 68000 },
+    ],
   ]);
 
   const res = await sendAlertEmail(

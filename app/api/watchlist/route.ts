@@ -6,8 +6,10 @@ import {
   getAccessToken,
   parseMlLink,
   previewItem,
+  previewOwnItem,
   resolveUserProduct,
 } from "@/lib/ml-api";
+import { getOwnItems, resolveOwnRef } from "@/lib/own-items";
 import type { Query } from "@/lib/ingest-core";
 
 export const runtime = "nodejs";
@@ -26,7 +28,7 @@ export async function GET() {
     const res = await sql.query(
       `SELECT w.id, w.kind, w.value, w.label, w.notes, w.ml_id, w.active,
               COALESCE(w.id_kind, 'item') AS id_kind,
-              w.sku,
+              w.own_ml_id, w.own_url,
               w.created_at,
               l.title, l.price, l.seller, l.ml_status, l.status,
               l.available_quantity, l.url, l.last_seen_at
@@ -34,7 +36,24 @@ export async function GET() {
        LEFT JOIN listings l ON l.ml_id = w.ml_id
        ORDER BY w.active DESC, w.created_at DESC`
     );
-    return NextResponse.json({ watchlist: res.rows });
+
+    // El precio propio se lee de ML, no de la base: es el mismo criterio
+    // que en el resto del tablero.
+    const own = await getOwnItems(query);
+    const watchlist = res.rows.map((w: any) => {
+      const mine = w.own_ml_id
+        ? own.map.get(String(w.own_ml_id).toUpperCase())
+        : undefined;
+      return {
+        ...w,
+        own_price: mine?.price ?? null,
+        own_title: mine?.title ?? null,
+        own_status: mine?.ml_status ?? null,
+        own_link: mine?.url ?? w.own_url ?? null,
+      };
+    });
+
+    return NextResponse.json({ watchlist, own_warnings: own.warnings });
   } catch (err) {
     return NextResponse.json(
       { error: err instanceof Error ? err.message : String(err) },
@@ -71,7 +90,7 @@ export async function POST(req: Request) {
    * pedia copiar un codigo a mano. Eso es trasladarle el problema al
    * usuario: elegir tiene que ser un click.
    */
-  const skuFromBody = String(body?.sku ?? "").trim() || null;
+  const ownLinkFromBody = String(body?.own_url ?? "").trim() || null;
   const chosenProductId = String(body?.product_id ?? "").trim().toUpperCase();
   if (chosenProductId) {
     if (!/^ML[A-Z]\d{4,}$/.test(chosenProductId)) {
@@ -80,7 +99,7 @@ export async function POST(req: Request) {
         { status: 400 }
       );
     }
-    return addProduct(chosenProductId, "product", raw || null, skuFromBody);
+    return addProduct(chosenProductId, "product", raw || null, ownLinkFromBody);
   }
 
   if (!raw) {
@@ -131,7 +150,7 @@ export async function POST(req: Request) {
       effectiveKind = parsed.kind === "product" ? "product" : "item";
     }
 
-    return addProduct(effectiveId, effectiveKind, raw, skuFromBody);
+    return addProduct(effectiveId, effectiveKind, raw, ownLinkFromBody);
   } catch (err) {
     return NextResponse.json(
       { error: err instanceof Error ? err.message : String(err) },
@@ -148,10 +167,24 @@ async function addProduct(
   id: string,
   kind: "item" | "product",
   sourceUrl: string | null,
-  sku: string | null = null
+  ownRef: string | null = null
 ) {
   try {
     const token = await getAccessToken(query);
+
+    // Mi publicación asociada. Se valida ANTES de guardar nada: si el link
+    // o el ID están mal, la persona se entera ahora y no mañana viendo una
+    // columna vacía sin explicación.
+    let ownMlId: string | null = null;
+    let ownUrl: string | null = null;
+    if (ownRef) {
+      const resolved = await resolveOwnRef(ownRef, token);
+      if (!resolved.ok) {
+        return NextResponse.json({ error: resolved.error }, { status: 400 });
+      }
+      ownMlId = resolved.ml_id;
+      ownUrl = resolved.url;
+    }
 
     const dup = await query(
       `SELECT id, active FROM watchlist WHERE ml_id = $1 LIMIT 1`,
@@ -172,22 +205,24 @@ async function addProduct(
     const l = preview.listing;
 
     await query(
-      `INSERT INTO watchlist (kind, value, label, notes, ml_id, id_kind, sku, active)
-       VALUES ('url', $1, $2, $3, $4, $5, $6, TRUE)
+      `INSERT INTO watchlist (kind, value, label, notes, ml_id, id_kind, own_ml_id, own_url, active)
+       VALUES ('url', $1, $2, $3, $4, $5, $6, $7, TRUE)
        ON CONFLICT (kind, value) DO UPDATE
-         SET active  = TRUE,
-             label   = EXCLUDED.label,
-             notes   = EXCLUDED.notes,
-             ml_id   = EXCLUDED.ml_id,
-             id_kind = EXCLUDED.id_kind,
-             sku     = COALESCE(EXCLUDED.sku, watchlist.sku)`,
+         SET active    = TRUE,
+             label     = EXCLUDED.label,
+             notes     = EXCLUDED.notes,
+             ml_id     = EXCLUDED.ml_id,
+             id_kind   = EXCLUDED.id_kind,
+             own_ml_id = COALESCE(EXCLUDED.own_ml_id, watchlist.own_ml_id),
+             own_url   = COALESCE(EXCLUDED.own_url, watchlist.own_url)`,
       [
         sourceUrl || l.url || id,
         String(l.title).slice(0, 300),
         null,
         id,
         preview.kind,
-        sku,
+        ownMlId,
+        ownUrl,
       ]
     );
 
@@ -202,15 +237,19 @@ async function addProduct(
       query
     );
 
-    if (sku) {
-      await query(`UPDATE listings SET sku = $2 WHERE ml_id = $1`, [id, sku]);
+    if (ownMlId) {
+      await query(
+        `UPDATE listings SET own_ml_id = $2, own_url = $3 WHERE ml_id = $1`,
+        [id, ownMlId, ownUrl]
+      );
     }
 
     return NextResponse.json({
       ok: true,
       ml_id: id,
       kind: preview.kind,
-      sku,
+      own_ml_id: ownMlId,
+      own_url: ownUrl,
       listing: {
         title: l.title,
         price: l.price,

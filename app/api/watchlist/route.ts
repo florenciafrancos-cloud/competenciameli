@@ -6,6 +6,7 @@ import {
   fetchOfferChoices,
   getAccessToken,
   hintedItemId,
+  hintedOfficialStore,
   parseMlLink,
   previewItem,
   previewOwnItem,
@@ -186,10 +187,22 @@ export async function POST(req: Request) {
     if (effectiveKind === "product" && !trackedItemId) {
       const pista = hintedItemId(raw);
       if (pista) {
-        return addProduct(effectiveId, "product", raw, ownLinkFromBody, {
-          itemId: pista,
-          sellerId: null,
-        });
+        // La pista puede apuntar a una publicacion que NO participa del
+        // catalogo (pasa con las de tienda oficial que tienen variantes
+        // internas). Se verifica antes de usarla: si no esta entre las
+        // ofertas, se muestra la lista en vez de un error que no explica
+        // nada.
+        const token2 = await getAccessToken(query);
+        const choices = await fetchOfferChoices(effectiveId, token2);
+        const existe =
+          choices.ok &&
+          choices.offers.some((o) => o.item_id.toUpperCase() === pista);
+        if (existe) {
+          return addProduct(effectiveId, "product", raw, ownLinkFromBody, {
+            itemId: pista,
+            sellerId: null,
+          });
+        }
       }
       return ofrecerVendedores(effectiveId, raw);
     }
@@ -229,12 +242,35 @@ async function ofrecerVendedores(productId: string, sourceUrl: string | null) {
         { status: 400 }
       );
     }
+
+    /**
+     * Si se llego al producto navegando desde una tienda oficial, el link
+     * trae su numero. Esa tienda va primera: es, casi siempre, a quien se
+     * queria seguir.
+     */
+    const tienda = sourceUrl ? hintedOfficialStore(sourceUrl) : null;
+    let offers = r.offers;
+    let hinted_store_found: boolean | null = null;
+
+    if (tienda !== null) {
+      const deLaTienda = offers.filter((o) => o.official_store_id === tienda);
+      hinted_store_found = deLaTienda.length > 0;
+      if (hinted_store_found) {
+        offers = [
+          ...deLaTienda,
+          ...offers.filter((o) => o.official_store_id !== tienda),
+        ];
+      }
+    }
+
     return NextResponse.json({
       needs_pick: true,
       product_id: productId,
       product_name: r.product_name,
       source_url: sourceUrl,
-      offers: r.offers,
+      hinted_store: tienda,
+      hinted_store_found,
+      offers,
     });
   } catch (err) {
     return NextResponse.json(

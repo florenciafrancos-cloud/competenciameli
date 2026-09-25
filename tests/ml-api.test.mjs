@@ -38,6 +38,7 @@ import {
   previewOwnItem,
   fetchMyItemsFromMl,
   fetchOfferChoices,
+  hintedOfficialStore,
   precioConEnvio,
 } from "../lib/ml-api";
 import {
@@ -1673,6 +1674,55 @@ await test("si el vendedor seguido se va, lo reporta y avisa por que", async () 
     39900,
     "CRITICO: se cambio solo de vendedor en vez de reportar la ausencia"
   );
+});
+
+console.log("\n== La lista no puede esconder vendedores ==");
+
+await test("CRITICO: devuelve TODOS los vendedores, sin recortar", async () => {
+  // Bug real: habia un tope de 40 para ahorrar consultas de nombres. Las
+  // tiendas oficiales suelen estar en el tramo caro, justo el que se
+  // cortaba, asi que quien entraba desde una tienda oficial no la
+  // encontraba en la lista.
+  const muchas = "MLA90000003";
+  putCatalog(muchas, { name: "Ficha con muchas ofertas" });
+  const ofertas = [];
+  for (let i = 0; i < 67; i++) {
+    ofertas.push({
+      item_id: `MLA81000${String(i).padStart(4, "0")}`,
+      seller_id: 1000 + i,
+      price: 20000 + i * 500,
+      free_shipping: true,
+      // La tienda oficial, ultima y mas cara: el caso que fallaba.
+      official_store_id: i === 66 ? 193704 : null,
+    });
+  }
+  putOffers(muchas, ofertas);
+
+  const r = await fetchOfferChoices(muchas, await getAccessToken(q));
+  assert.equal(r.ok, true);
+  assert.equal(r.offers.length, 67, "recorto la lista");
+  const oficial = r.offers.find((o) => o.official_store);
+  assert.ok(oficial, "la tienda oficial no aparece");
+  assert.equal(oficial.official_store_id, 193704);
+});
+
+await test("resuelve el nombre de la tienda oficial aunque este al final", async () => {
+  const r = await fetchOfferChoices("MLA90000003", await getAccessToken(q));
+  const oficial = r.offers.find((o) => o.official_store);
+  assert.ok(oficial.seller, "quedo sin nombre justo la que se busca a ojo");
+});
+
+await test("lee el numero de tienda oficial del link", () => {
+  // URL real de Florencia, con el filtro escapado.
+  const url =
+    "https://www.mercadolibre.com.ar/vaso-termico-contigo/p/MLA63891136" +
+    "?pdp_filters=item_id%3AMLA1697454891&pdp_filters=official_store%3A193704";
+  assert.equal(hintedOfficialStore(url), 193704);
+  assert.equal(hintedItemId(url), "MLA1697454891");
+});
+
+await test("sin tienda oficial en el link devuelve null", () => {
+  assert.equal(hintedOfficialStore("https://www.mercadolibre.com.ar/x/p/MLA1"), null);
 });
 
 // ---------------------------------------------------------------

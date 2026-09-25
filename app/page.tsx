@@ -183,6 +183,8 @@ export default function Home() {
   const [offerPick, setOfferPick] = useState<{
     product_id: string;
     product_name: string | null;
+    hinted_store?: number | null;
+    hinted_store_found?: boolean | null;
     offers: {
       item_id: string;
       seller_id: number | null;
@@ -192,6 +194,7 @@ export default function Home() {
       shipping_cost: number;
       price_total: number;
       official_store: boolean;
+      official_store_id?: number | null;
     }[];
   } | null>(null);
 
@@ -368,6 +371,8 @@ export default function Home() {
         setOfferPick({
           product_id: d.product_id,
           product_name: d.product_name ?? null,
+          hinted_store: d.hinted_store ?? null,
+          hinted_store_found: d.hinted_store_found ?? null,
           offers: d.offers ?? [],
         });
         setCandidates([]);
@@ -414,6 +419,8 @@ export default function Home() {
         setOfferPick({
           product_id: d.product_id,
           product_name: d.product_name ?? null,
+          hinted_store: d.hinted_store ?? null,
+          hinted_store_found: d.hinted_store_found ?? null,
           offers: d.offers ?? [],
         });
         setCandidates([]);
@@ -1727,6 +1734,8 @@ function OfferPicker({
   pick: {
     product_id: string;
     product_name: string | null;
+    hinted_store?: number | null;
+    hinted_store_found?: boolean | null;
     offers: {
       item_id: string;
       seller_id: number | null;
@@ -1736,51 +1745,112 @@ function OfferPicker({
       shipping_cost: number;
       price_total: number;
       official_store: boolean;
+      official_store_id?: number | null;
     }[];
   } | null;
   onChoose: (itemId: string, sellerId: number | null) => void;
   onCancel: () => void;
   disabled?: boolean;
 }) {
+  const [q, setQ] = useState("");
+  const [soloOficiales, setSoloOficiales] = useState(false);
+
   if (!pick) return null;
+
+  const needle = q.trim().toLowerCase();
+  const shown = pick.offers.filter((o) => {
+    if (soloOficiales && !o.official_store) return false;
+    if (!needle) return true;
+    return (
+      (o.seller ?? "").toLowerCase().includes(needle) ||
+      String(o.seller_id ?? "").includes(needle) ||
+      o.item_id.toLowerCase().includes(needle)
+    );
+  });
+
+  const oficiales = pick.offers.filter((o) => o.official_store).length;
 
   return (
     <div className="mt-4 border hairline rounded-lg p-3">
-      <p className="text-[13px] font-medium">
-        ¿A qué vendedor querés seguir?
-      </p>
-      <p className="muted text-[12px] mt-0.5 mb-3">
-        {pick.product_name ?? pick.product_id} · {pick.offers.length} ofertas
-        compiten por este producto. Elegí una: la app te va a avisar cuando
-        ese vendedor cambie el precio, y no cuando aparezca otro más barato.
+      <p className="text-[13px] font-medium">¿A qué vendedor querés seguir?</p>
+      <p className="muted text-[12px] mt-0.5">
+        {pick.product_name ?? pick.product_id} · {pick.offers.length} vendedores
+        compiten por este producto
+        {oficiales > 0 && `, ${oficiales} de ellos tienda oficial`}. Elegí uno:
+        la app te va a avisar cuando <strong>ese</strong> cambie el precio, y no
+        cuando aparezca otro más barato.
       </p>
 
+      {/* Si se llegó navegando desde una tienda oficial, se avisa si esa
+          tienda está o no compitiendo en esta ficha. Es la diferencia entre
+          "no la encuentro" y "no está". */}
+      {pick.hinted_store != null && pick.hinted_store_found === false && (
+        <p className="text-up text-[12px] mt-2">
+          La tienda oficial por la que entraste no tiene una oferta compitiendo
+          en esta ficha, así que no aparece abajo. Suele pasar cuando su
+          publicación maneja variantes propias y no participa del catálogo.
+        </p>
+      )}
+      {pick.hinted_store != null && pick.hinted_store_found === true && (
+        <p className="muted text-[12px] mt-2">
+          La tienda oficial por la que entraste está primera en la lista.
+        </p>
+      )}
+
+      <div className="flex gap-2 items-center flex-wrap mt-3 mb-2">
+        <input
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          placeholder="Buscar vendedor…"
+          className="rounded-md border hairline bg-transparent px-2 py-1 text-[12px] w-56"
+        />
+        {oficiales > 0 && (
+          <label className="text-[12px] flex items-center gap-1.5">
+            <input
+              type="checkbox"
+              checked={soloOficiales}
+              onChange={(e) => setSoloOficiales(e.target.checked)}
+            />
+            Sólo tiendas oficiales
+          </label>
+        )}
+        <span className="muted text-[11px]">
+          {shown.length} de {pick.offers.length}
+        </span>
+      </div>
+
       <div className="max-h-80 overflow-y-auto">
-        {pick.offers.map((o) => (
-          <button
-            key={o.item_id}
-            disabled={disabled}
-            onClick={() => onChoose(o.item_id, o.seller_id)}
-            className="w-full text-left px-3 py-2 text-[12px] rounded-md hover:bg-black/[.04] disabled:opacity-40"
-          >
-            <div className="flex items-baseline justify-between gap-3">
-              <span className="font-medium">
-                {o.seller ?? `Vendedor ${o.seller_id ?? "?"}`}
-                {o.official_store && (
-                  <span className="muted"> · tienda oficial</span>
-                )}
-              </span>
-              <span className="tabular whitespace-nowrap">
-                {money(o.price)}
-              </span>
-            </div>
-            <div className="muted text-[11px]">
-              {o.free_shipping
-                ? "envío gratis"
-                : `+ ${money(o.shipping_cost)} de envío → ${money(o.price_total)}`}
-            </div>
-          </button>
-        ))}
+        {shown.length === 0 ? (
+          <p className="muted text-[12px] p-3">
+            Ningún vendedor coincide con lo que buscaste.
+          </p>
+        ) : (
+          shown.map((o) => (
+            <button
+              key={o.item_id}
+              disabled={disabled}
+              onClick={() => onChoose(o.item_id, o.seller_id)}
+              className="w-full text-left px-3 py-2 text-[12px] rounded-md hover:bg-black/[.04] disabled:opacity-40"
+            >
+              <div className="flex items-baseline justify-between gap-3">
+                <span className="font-medium">
+                  {o.seller ?? `Vendedor ${o.seller_id ?? "?"}`}
+                  {o.official_store && (
+                    <span className="muted"> · tienda oficial</span>
+                  )}
+                </span>
+                <span className="tabular whitespace-nowrap">
+                  {money(o.price)}
+                </span>
+              </div>
+              <div className="muted text-[11px]">
+                {o.free_shipping
+                  ? "envío gratis"
+                  : `+ ${money(o.shipping_cost)} de envío → ${money(o.price_total)}`}
+              </div>
+            </button>
+          ))
+        )}
       </div>
 
       <button

@@ -1562,6 +1562,7 @@ export type OfferChoice = {
   /** Lo que realmente paga el comprador. */
   price_total: number;
   official_store: boolean;
+  official_store_id: number | null;
 };
 
 /**
@@ -1622,13 +1623,39 @@ export async function fetchOfferChoices(
         precioConEnvio(a) - precioConEnvio(b)
     );
 
+  /**
+   * TODAS las ofertas entran en la lista. Ninguna se recorta.
+   *
+   * Antes habia un tope de 40 para no disparar una consulta de nombre por
+   * vendedor. El efecto real fue peor que el costo que evitaba: las tiendas
+   * oficiales suelen estar en el tramo caro de la lista, justo el que se
+   * cortaba, y entonces la persona entraba desde una tienda oficial y no la
+   * encontraba entre las opciones.
+   *
+   * Lo que se limita ahora es solo la resolucion de NOMBRES, que es la
+   * parte cara. Las ofertas de tiendas oficiales se resuelven siempre,
+   * porque son las que se buscan a ojo; el resto, las primeras `limite`.
+   * Una oferta sin nombre resuelto igual se muestra, con su numero.
+   */
   const limite = opts.limite ?? 40;
   const sellers = new SellerResolver(token);
 
+  const resolver = new Set<number>();
+  for (let i = 0; i < base.length && resolver.size < limite; i++) {
+    if (base[i].seller_id != null) resolver.add(base[i].seller_id as number);
+  }
+  for (const o of base) {
+    if (o.official_store_id != null && o.seller_id != null) {
+      resolver.add(o.seller_id);
+    }
+  }
+
   const offers: OfferChoice[] = [];
-  for (let i = 0; i < base.length && i < limite; i++) {
-    const o = base[i];
-    const nick = await sellers.nickname(o.seller_id ?? undefined);
+  for (const o of base) {
+    const nick =
+      o.seller_id != null && resolver.has(o.seller_id)
+        ? await sellers.nickname(o.seller_id)
+        : null;
     offers.push({
       item_id: o.item_id,
       seller_id: o.seller_id,
@@ -1638,6 +1665,7 @@ export async function fetchOfferChoices(
       shipping_cost: o.shipping_cost ?? 0,
       price_total: precioConEnvio(o),
       official_store: o.official_store_id != null,
+      official_store_id: o.official_store_id ?? null,
     });
   }
 
@@ -1646,4 +1674,19 @@ export async function fetchOfferChoices(
     product_name: (prod.data?.name ?? null) as string | null,
     offers,
   };
+}
+
+/**
+ * El numero de tienda oficial que viene en el link, cuando se llego al
+ * producto navegando desde una tienda.
+ *
+ * Ejemplo real:
+ *   ...?pdp_filters=official_store%3A193704&...
+ *
+ * Sirve para poner esa tienda primera en la lista: si entraste por ella,
+ * es casi seguro a quien querias seguir.
+ */
+export function hintedOfficialStore(url: string): number | null {
+  const m = url.match(/official_store(?::|%3A)(\d+)/i);
+  return m ? Number(m[1]) : null;
 }

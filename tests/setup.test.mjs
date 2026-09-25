@@ -178,6 +178,18 @@ await test("el watchlist arranca vacio", async () => {
   assert.equal(res.rows[0].n, 0);
 });
 
+await test("v17: las columnas del vendedor seguido existen", async () => {
+  // Sin estas, la corrida diaria vuelve a seguir "la mas barata del dia"
+  // sin ningun error visible: el peor modo de falla.
+  const res = await client.query(
+    `SELECT table_name, column_name FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND ((table_name = 'watchlist' AND column_name IN ('tracked_item_id','tracked_seller_id','tracked_seller'))
+          OR (table_name = 'listings' AND column_name IN ('tracked_item_id','tracked_seller_id')))`
+  );
+  assert.equal(res.rows.length, 5, `faltan columnas: ${res.rows.length}/5`);
+});
+
 await test("v16: las columnas de mi publicacion propia existen", async () => {
   // Si faltan, el tablero abre pero la columna "Mi publicación" queda muda
   // sin ningun error visible: el peor modo de falla posible.

@@ -187,3 +187,29 @@ CREATE INDEX IF NOT EXISTS watchlist_own_ml_id_idx ON watchlist (own_ml_id);
 -- por que.
 ALTER TABLE ml_tokens ADD COLUMN IF NOT EXISTS ml_user_id  BIGINT;
 ALTER TABLE ml_tokens ADD COLUMN IF NOT EXISTS ml_nickname TEXT;
+
+-- ----------------------------------------------------------------
+-- v17: se sigue la oferta de UN VENDEDOR dentro de la ficha, no la
+-- mas barata.
+--
+-- Por que: una ficha de catalogo la comparten decenas de vendedores
+-- (67 en el caso verificado). Mostrar la mas barata mezclaba en un
+-- mismo numero a competidores serios con ofertas sueltas de precio
+-- bajo y envio caro. Contra quien se compite es contra un vendedor
+-- concreto, asi que se guarda cual.
+--
+-- Se guardan los dos datos a proposito:
+--   tracked_item_id   la publicacion exacta que se eligio
+--   tracked_seller_id el vendedor dueño de esa publicacion
+--
+-- El item_id es lo preciso, pero un vendedor puede dar de baja una
+-- publicacion y volver a subirla con otro ID. Teniendo el seller_id
+-- se lo puede volver a encontrar en la ficha en vez de reportar una
+-- baja que no ocurrio.
+-- ----------------------------------------------------------------
+ALTER TABLE watchlist ADD COLUMN IF NOT EXISTS tracked_item_id   TEXT;
+ALTER TABLE watchlist ADD COLUMN IF NOT EXISTS tracked_seller_id BIGINT;
+ALTER TABLE watchlist ADD COLUMN IF NOT EXISTS tracked_seller    TEXT;
+
+ALTER TABLE listings  ADD COLUMN IF NOT EXISTS tracked_item_id   TEXT;
+ALTER TABLE listings  ADD COLUMN IF NOT EXISTS tracked_seller_id BIGINT;

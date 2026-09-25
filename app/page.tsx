@@ -175,6 +175,26 @@ export default function Home() {
   const [addMsg, setAddMsg] = useState<{ ok: boolean; text: string } | null>(
     null
   );
+  /**
+   * Las ofertas de una ficha, cuando hay que elegir a qué vendedor seguir.
+   * Una ficha de catálogo la comparten decenas de vendedores y se compite
+   * contra uno concreto, así que el alta pasa por elegirlo.
+   */
+  const [offerPick, setOfferPick] = useState<{
+    product_id: string;
+    product_name: string | null;
+    offers: {
+      item_id: string;
+      seller_id: number | null;
+      seller: string | null;
+      price: number;
+      free_shipping: boolean;
+      shipping_cost: number;
+      price_total: number;
+      official_store: boolean;
+    }[];
+  } | null>(null);
+
   const [candidates, setCandidates] = useState<
     {
       id: string;
@@ -343,6 +363,15 @@ export default function Home() {
       if (!res.ok) {
         setCandidates(Array.isArray(d.candidates) ? d.candidates : []);
         setAddMsg({ ok: false, text: d.error ?? "No se pudo agregar." });
+      } else if (d.needs_pick) {
+        // Falta el paso importante: a quién seguir dentro de la ficha.
+        setOfferPick({
+          product_id: d.product_id,
+          product_name: d.product_name ?? null,
+          offers: d.offers ?? [],
+        });
+        setCandidates([]);
+        setAddMsg(null);
       } else {
         setAddMsg({
           ok: true,
@@ -353,6 +382,7 @@ export default function Home() {
           }`,
         });
         setNewLink("");
+        setOfferPick(null);
         setCandidates([]);
         load();
       }
@@ -380,6 +410,14 @@ export default function Home() {
       const d = await res.json();
       if (!res.ok) {
         setAddMsg({ ok: false, text: d.error ?? "No se pudo agregar." });
+      } else if (d.needs_pick) {
+        setOfferPick({
+          product_id: d.product_id,
+          product_name: d.product_name ?? null,
+          offers: d.offers ?? [],
+        });
+        setCandidates([]);
+        setAddMsg(null);
       } else {
         setAddMsg({
           ok: true,
@@ -389,7 +427,47 @@ export default function Home() {
         });
         setNewLink("");
         setNewOwn("");
+        setOfferPick(null);
         setCandidates([]);
+        load();
+      }
+    } catch (e) {
+      setAddMsg({ ok: false, text: e instanceof Error ? e.message : String(e) });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  /** La persona eligió a qué vendedor seguir: un click y queda. */
+  async function chooseSeller(itemId: string, sellerId: number | null) {
+    if (!offerPick) return;
+    setSaving(true);
+    setAddMsg(null);
+    try {
+      const res = await fetch("/api/watchlist", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          product_id: offerPick.product_id,
+          value: newLink.trim(),
+          own_url: newOwn || null,
+          tracked_item_id: itemId,
+          tracked_seller_id: sellerId,
+        }),
+      });
+      const d = await res.json();
+      if (!res.ok) {
+        setAddMsg({ ok: false, text: d.error ?? "No se pudo agregar." });
+      } else {
+        setAddMsg({
+          ok: true,
+          text:
+            `Listo. Se sigue a ${d.tracked_seller ?? `vendedor ${sellerId ?? "?"}`}` +
+            ` en ${d.listing.title} — ${money(d.listing.price)}`,
+        });
+        setNewLink("");
+        setNewOwn("");
+        setOfferPick(null);
         load();
       }
     } catch (e) {
@@ -654,6 +732,12 @@ export default function Home() {
           <CandidateList
             candidates={candidates}
             onChoose={chooseCandidate}
+            disabled={saving}
+          />
+          <OfferPicker
+            pick={offerPick}
+            onChoose={chooseSeller}
+            onCancel={() => setOfferPick(null)}
             disabled={saving}
           />
           <p className="muted text-[12px] mt-4">
@@ -1079,12 +1163,19 @@ export default function Home() {
             onChoose={chooseCandidate}
             disabled={saving}
           />
+          <OfferPicker
+            pick={offerPick}
+            onChoose={chooseSeller}
+            onCancel={() => setOfferPick(null)}
+            disabled={saving}
+          />
 
           <div className="scroll-x mt-4">
             <table className="data">
               <thead>
                 <tr>
                   <th>Publicación</th>
+                  <th>Vendedor que sigo</th>
                   <th>Mi publicación</th>
                   <th style={{ textAlign: "right" }}>Último precio</th>
                   <th>Estado</th>
@@ -1111,6 +1202,19 @@ export default function Home() {
                           ) : (
                             w.title || w.label
                           )}
+                        </td>
+                        {/* A quién se le sigue el precio dentro de la ficha.
+                            Sin esto no se puede saber de quién es el número
+                            que muestra la fila. */}
+                        <td className="text-[12px]">
+                          {w.tracked_seller ??
+                            (w.tracked_seller_id
+                              ? `Vendedor ${w.tracked_seller_id}`
+                              : null) ?? (
+                              <span className="muted">
+                                el más barato de la ficha
+                              </span>
+                            )}
                         </td>
                         <td>
                           {myItems.length > 0 ? (
@@ -1599,6 +1703,96 @@ function Diferencia({
   );
 }
 
+/**
+ * Elegir a qué vendedor seguir dentro de una ficha de catálogo.
+ *
+ * POR QUE ESTE PASO EXISTE
+ * ------------------------
+ * Un link de Mercado Libre no es la publicación de un vendedor: es la
+ * ficha del producto, compartida por decenas de vendedores (67 en el caso
+ * que disparó este cambio). Antes la app seguía la oferta más barata del
+ * día, que puede ser de un vendedor distinto cada mañana — y entonces
+ * "bajó el precio" podía significar en realidad "entró otro más barato".
+ *
+ * Se muestra el precio CON envío además del de lista, porque es lo que
+ * paga el comprador y lo que hace comparables dos ofertas: en la ficha
+ * verificada, la más barata de $29.950 tenía $8.490 de envío.
+ */
+function OfferPicker({
+  pick,
+  onChoose,
+  onCancel,
+  disabled,
+}: {
+  pick: {
+    product_id: string;
+    product_name: string | null;
+    offers: {
+      item_id: string;
+      seller_id: number | null;
+      seller: string | null;
+      price: number;
+      free_shipping: boolean;
+      shipping_cost: number;
+      price_total: number;
+      official_store: boolean;
+    }[];
+  } | null;
+  onChoose: (itemId: string, sellerId: number | null) => void;
+  onCancel: () => void;
+  disabled?: boolean;
+}) {
+  if (!pick) return null;
+
+  return (
+    <div className="mt-4 border hairline rounded-lg p-3">
+      <p className="text-[13px] font-medium">
+        ¿A qué vendedor querés seguir?
+      </p>
+      <p className="muted text-[12px] mt-0.5 mb-3">
+        {pick.product_name ?? pick.product_id} · {pick.offers.length} ofertas
+        compiten por este producto. Elegí una: la app te va a avisar cuando
+        ese vendedor cambie el precio, y no cuando aparezca otro más barato.
+      </p>
+
+      <div className="max-h-80 overflow-y-auto">
+        {pick.offers.map((o) => (
+          <button
+            key={o.item_id}
+            disabled={disabled}
+            onClick={() => onChoose(o.item_id, o.seller_id)}
+            className="w-full text-left px-3 py-2 text-[12px] rounded-md hover:bg-black/[.04] disabled:opacity-40"
+          >
+            <div className="flex items-baseline justify-between gap-3">
+              <span className="font-medium">
+                {o.seller ?? `Vendedor ${o.seller_id ?? "?"}`}
+                {o.official_store && (
+                  <span className="muted"> · tienda oficial</span>
+                )}
+              </span>
+              <span className="tabular whitespace-nowrap">
+                {money(o.price)}
+              </span>
+            </div>
+            <div className="muted text-[11px]">
+              {o.free_shipping
+                ? "envío gratis"
+                : `+ ${money(o.shipping_cost)} de envío → ${money(o.price_total)}`}
+            </div>
+          </button>
+        ))}
+      </div>
+
+      <button
+        onClick={onCancel}
+        className="muted text-[12px] underline decoration-dotted mt-2"
+      >
+        Cancelar
+      </button>
+    </div>
+  );
+}
+
 function CandidateList({
   candidates,
   onChoose,
@@ -1651,14 +1845,8 @@ function CandidateList({
 
 function Kpi({ label, value }: { label: string; value: string | number }) {
   return (
-    // Fondo negro con letras blancas, igual que el encabezado.
-    // No se usa la clase `card` a proposito: esa la comparten los paneles
-    // de aviso y las tablas, que siguen siendo claros.
-    <div className="bg-black text-white rounded-lg p-3.5">
-      {/* `muted` es casi negro: sobre negro no se leeria. */}
-      <div className="text-white/70 text-[11px] uppercase tracking-wide">
-        {label}
-      </div>
+    <div className="card p-3.5">
+      <div className="muted text-[11px] uppercase tracking-wide">{label}</div>
       <div className="text-2xl font-semibold tabular mt-1">{value}</div>
     </div>
   );

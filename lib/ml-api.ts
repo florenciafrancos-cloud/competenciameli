@@ -579,13 +579,18 @@ export async function previewItem(
   mlId: string,
   token: string,
   kind: MlLinkKind = "item",
-  fallbackUrl: string | null = null
+  fallbackUrl: string | null = null,
+  tracked: { itemId?: string | null; sellerId?: number | null } = {}
 ): Promise<
   | { ok: true; listing: ScrapedListing; kind: MlLinkKind }
   | { ok: false; error: string }
 > {
   if (kind === "product") {
-    const r = await fetchCatalogProduct(mlId, token, { fallbackUrl });
+    const r = await fetchCatalogProduct(mlId, token, {
+      fallbackUrl,
+      trackedItemId: tracked.itemId ?? null,
+      trackedSellerId: tracked.sellerId ?? null,
+    });
     return r.ok
       ? { ok: true, listing: r.listing, kind: "product" }
       : { ok: false, error: r.error };
@@ -673,6 +678,12 @@ type CatalogOffer = {
   original_price?: number | null;
   listing_type_id?: string;
   condition?: string;
+  /** El envio cambia el precio real: una oferta barata con envio caro no
+   *  es la mas barata. Verificado en MLA58102043: la oferta de $29.950
+   *  tenia $8.490 de envio, o sea $38.440 para el comprador. */
+  free_shipping?: boolean;
+  shipping_cost?: number | null;
+  official_store_id?: number | null;
 };
 
 export type CatalogResult =
@@ -682,6 +693,12 @@ export type CatalogResult =
       winnerItemId: string | null;
       offers: CatalogOffer[];
       warnings: string[];
+      /** Como se eligio la oferta que se esta reportando. */
+      pick:
+        | "seguida"        // la publicacion exacta que se eligio
+        | "seguida-nuevo-id" // el mismo vendedor, con otra publicacion
+        | "seguida-ausente"  // el vendedor ya no tiene oferta en la ficha
+        | "mas-barata";      // no hay vendedor elegido: comportamiento viejo
     }
   | { ok: false; error: string; status: number };
 
@@ -689,6 +706,7 @@ export type CatalogResult =
 function toOffer(r: any): CatalogOffer | null {
   const price = Number(r?.price);
   if (!Number.isFinite(price) || price <= 0) return null;
+  const free = r?.shipping?.free_shipping === true;
   return {
     item_id: String(r.item_id ?? r.id ?? ""),
     seller_id: r.seller_id ?? null,
@@ -698,13 +716,32 @@ function toOffer(r: any): CatalogOffer | null {
     original_price: r.original_price ?? null,
     listing_type_id: r.listing_type_id,
     condition: r.condition,
+    free_shipping: free,
+    shipping_cost: free ? 0 : Number(r?.shipping?.cost ?? 0) || 0,
+    official_store_id: r.official_store_id ?? null,
   };
+}
+
+/** Lo que realmente paga el comprador. */
+export function precioConEnvio(o: {
+  price: number;
+  free_shipping?: boolean;
+  shipping_cost?: number | null;
+}): number {
+  return o.free_shipping ? o.price : o.price + (o.shipping_cost ?? 0);
 }
 
 export async function fetchCatalogProduct(
   productId: string,
   token: string,
-  opts: { fallbackUrl?: string | null } = {}
+  opts: {
+    fallbackUrl?: string | null;
+    /** La publicacion puntual que se eligio seguir dentro de la ficha. */
+    trackedItemId?: string | null;
+    /** Su vendedor. Sirve de red: si el vendedor republica con otro ID,
+     *  se lo vuelve a encontrar en vez de reportar una baja falsa. */
+    trackedSellerId?: number | null;
+  } = {}
 ): Promise<CatalogResult> {
   const warnings: string[] = [];
 
@@ -753,14 +790,71 @@ export async function fetchCatalogProduct(
     );
   }
 
-  // El ganador declarado por ML, si viene; si no, la oferta mas barata.
-  const declared = product.buy_box_winner;
-  const winner: CatalogOffer | null =
-    declared && Number(declared.price) > 0
-      ? toOffer(declared)
-      : offers.length > 0
-        ? offers[0]
-        : null;
+  /**
+   * QUE OFERTA SE REPORTA
+   * ---------------------
+   * Si hay un vendedor elegido, se reporta SU oferta. No la mas barata, y
+   * tampoco la que Mercado Libre destaca.
+   *
+   * Es deliberado: se compite contra un vendedor concreto. Cambiar solo de
+   * oferta cuando aparece una mas barata haria que la serie de precios
+   * mezclara vendedores distintos, y entonces "bajo el precio" podria
+   * significar en realidad "entro otro vendedor mas barato". Dos cosas
+   * distintas que no pueden compartir la misma alerta.
+   *
+   * Verificado el 25/09/2026 sobre MLA58102043: `buy_box_winner` viene
+   * null, asi que la oferta destacada por ML no es obtenible por API.
+   */
+  const trackedId = (opts.trackedItemId ?? "").trim().toUpperCase() || null;
+  const trackedSeller = opts.trackedSellerId ?? null;
+
+  let winner: CatalogOffer | null = null;
+  let pick: "seguida" | "seguida-nuevo-id" | "seguida-ausente" | "mas-barata" =
+    "mas-barata";
+
+  if (trackedId || trackedSeller !== null) {
+    const exacta = trackedId
+      ? offers.find((o) => o.item_id.toUpperCase() === trackedId) ?? null
+      : null;
+
+    if (exacta) {
+      winner = exacta;
+      pick = "seguida";
+    } else if (trackedSeller !== null) {
+      // Mismo vendedor, otra publicacion: es el caso de quien da de baja y
+      // vuelve a subir. Se toma su oferta mas barata.
+      const delVendedor = offers.filter((o) => o.seller_id === trackedSeller);
+      if (delVendedor.length > 0) {
+        winner = delVendedor[0];
+        pick = "seguida-nuevo-id";
+        warnings.push(
+          `El vendedor que seguís cambió de publicación en esta ficha ` +
+            `(${trackedId ?? "?"} → ${delVendedor[0].item_id}). Se sigue la nueva.`
+        );
+      }
+    }
+
+    if (!winner) {
+      // El vendedor ya no compite en esta ficha. Es informacion, no un
+      // error: se reporta como tal y NO se cae a otra oferta, porque eso
+      // seria cambiar de competidor sin avisar.
+      return {
+        ok: false,
+        status: 404,
+        error:
+          `El vendedor que seguís ya no tiene una oferta activa en la ficha ${productId}. ` +
+          `Puede haber dado de baja la publicación o haberse quedado sin stock.`,
+      };
+    }
+  } else {
+    const declared = product.buy_box_winner;
+    winner =
+      declared && Number(declared.price) > 0
+        ? toOffer(declared)
+        : offers.length > 0
+          ? offers[0]
+          : null;
+  }
 
   if (!winner) {
     return {
@@ -825,7 +919,14 @@ export async function fetchCatalogProduct(
     offers_count: offers.length > 0 ? offers.length : null,
   };
 
-  return { ok: true, listing, winnerItemId: winner.item_id || null, offers, warnings };
+  return {
+    ok: true,
+    listing,
+    winnerItemId: winner.item_id || null,
+    offers,
+    warnings,
+    pick,
+  };
 }
 
 /**
@@ -840,8 +941,16 @@ function guessBrand(product: any): string {
 }
 
 /** Consulta varias fichas de catalogo. */
+export type CatalogEntry = {
+  id: string;
+  url?: string | null;
+  /** La publicacion elegida dentro de la ficha, y su vendedor. */
+  trackedItemId?: string | null;
+  trackedSellerId?: number | null;
+};
+
 export async function fetchCatalogProducts(
-  products: (string | { id: string; url?: string | null })[],
+  products: (string | CatalogEntry)[],
   token: string
 ): Promise<FetchItemsResult> {
   const listings: ScrapedListing[] = [];
@@ -857,13 +966,27 @@ export async function fetchCatalogProducts(
     if (seen.has(id)) continue;
     seen.add(id);
     const url = typeof entry === "string" ? null : entry.url ?? null;
+    const trackedItemId =
+      typeof entry === "string" ? null : entry.trackedItemId ?? null;
+    const trackedSellerId =
+      typeof entry === "string" ? null : entry.trackedSellerId ?? null;
 
-    const r = await fetchCatalogProduct(id, token, { fallbackUrl: url });
+    const r = await fetchCatalogProduct(id, token, {
+      fallbackUrl: url,
+      trackedItemId,
+      trackedSellerId,
+    });
     if (r.ok) {
       listings.push(r.listing);
       r.warnings.forEach((w) => globalWarnings.add(w));
     } else if (r.status === 404) {
+      // Incluye el caso "el vendedor que seguís ya no tiene oferta": se
+      // trata como baja, que es exactamente lo que es desde el punto de
+      // vista del seguimiento.
       notFound.push(id);
+      if (trackedItemId || trackedSellerId !== null) {
+        warnings.push(`${id}: ${r.error}`);
+      }
     } else {
       warnings.push(`${id}: ${r.error}`);
     }
@@ -1422,4 +1545,105 @@ export async function fetchMyItemsFromMl(token: string): Promise<OwnListing[]> {
   // Alfabetico: el buscador filtra igual, pero abrirlo y ver una lista
   // ordenada es mas facil de recorrer que el orden en que ML las devuelve.
   return listings.sort((a, b) => a.title.localeCompare(b.title, "es"));
+}
+
+// ---------------------------------------------------------------
+// Elegir a que vendedor seguir dentro de una ficha
+// ---------------------------------------------------------------
+
+export type OfferChoice = {
+  item_id: string;
+  seller_id: number | null;
+  /** Nombre del vendedor. null cuando ML no lo habilita: se muestra el ID. */
+  seller: string | null;
+  price: number;
+  free_shipping: boolean;
+  shipping_cost: number;
+  /** Lo que realmente paga el comprador. */
+  price_total: number;
+  official_store: boolean;
+};
+
+/**
+ * Las ofertas de una ficha, listas para mostrar y elegir una con un click.
+ *
+ * Se resuelve el nombre de cada vendedor porque elegir entre "537319556" y
+ * "295542128" no es elegir: es adivinar. Cuando ML no habilita los nombres
+ * (403), se devuelve null y la pantalla muestra el numero, que al menos es
+ * estable.
+ *
+ * Se ordena por precio real (con envio) porque es el orden en que la
+ * persona piensa el mercado. Verificado el 25/09/2026 en MLA58102043: las
+ * 15 ofertas mas baratas no tenian envio gratis, y la primera de $29.950
+ * tenia $8.490 de envio.
+ *
+ * `limite` existe para no disparar 67 llamadas a /users/{id} en una
+ * pantalla: se resuelven los nombres de las primeras y el resto queda por
+ * numero.
+ */
+export async function fetchOfferChoices(
+  productId: string,
+  token: string,
+  opts: { limite?: number } = {}
+): Promise<
+  | { ok: true; product_name: string | null; offers: OfferChoice[] }
+  | { ok: false; error: string }
+> {
+  const prod = await mlFetch(`/products/${productId}`, token);
+  if (prod.status === 404) {
+    return {
+      ok: false,
+      error: `Mercado Libre no encontró la ficha ${productId}. Revisá el link.`,
+    };
+  }
+
+  const res = await mlFetch(`/products/${productId}/items`, token);
+  if (res.status === 404) {
+    return {
+      ok: false,
+      error:
+        `La ficha ${productId} existe pero no tiene ofertas activas ` +
+        `(Mercado Libre responde "No winners found"). No hay a quién seguir todavía.`,
+    };
+  }
+  if (!res.ok) {
+    return {
+      ok: false,
+      error: `Mercado Libre respondió ${res.status} al listar las ofertas de ${productId}.`,
+    };
+  }
+
+  const crudas: any[] = Array.isArray(res.data?.results) ? res.data.results : [];
+  const base = crudas
+    .map(toOffer)
+    .filter((o: CatalogOffer | null): o is CatalogOffer => o !== null)
+    .sort(
+      (a: CatalogOffer, b: CatalogOffer) =>
+        precioConEnvio(a) - precioConEnvio(b)
+    );
+
+  const limite = opts.limite ?? 40;
+  const sellers = new SellerResolver(token);
+
+  const offers: OfferChoice[] = [];
+  for (let i = 0; i < base.length && i < limite; i++) {
+    const o = base[i];
+    const nick = await sellers.nickname(o.seller_id ?? undefined);
+    offers.push({
+      item_id: o.item_id,
+      seller_id: o.seller_id,
+      seller: nick,
+      price: o.price,
+      free_shipping: o.free_shipping === true,
+      shipping_cost: o.shipping_cost ?? 0,
+      price_total: precioConEnvio(o),
+      official_store: o.official_store_id != null,
+    });
+  }
+
+  return {
+    ok: true,
+    product_name: (prod.data?.name ?? null) as string | null,
+    offers,
+  };
 }

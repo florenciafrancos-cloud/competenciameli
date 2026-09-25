@@ -51,12 +51,18 @@ export async function runScan(
 
   // ---- 1. Que seguir ----
   const wl = await q(
-    `SELECT kind, value, ml_id, COALESCE(id_kind, 'item') AS id_kind
+    `SELECT kind, value, ml_id, COALESCE(id_kind, 'item') AS id_kind,
+            tracked_item_id, tracked_seller_id
      FROM watchlist WHERE active = TRUE ORDER BY id`
   );
 
   const itemIds: string[] = [];
-  const productEntries: { id: string; url: string | null }[] = [];
+  const productEntries: {
+    id: string;
+    url: string | null;
+    trackedItemId: string | null;
+    trackedSellerId: number | null;
+  }[] = [];
   const unparsed: string[] = [];
   let legacyCount = 0;
 
@@ -76,7 +82,17 @@ export async function runScan(
       if (parsed.kind === "product") {
         // El permalink de las fichas viene vacio en la API, asi que se
         // conserva el link que pego el usuario para poder abrirlo.
-        productEntries.push({ id: parsed.id.toUpperCase(), url: row.value ?? null });
+        // Se arrastra el vendedor elegido: la corrida tiene que mirar SU
+        // oferta dentro de la ficha, no la mas barata del dia.
+        productEntries.push({
+          id: parsed.id.toUpperCase(),
+          url: row.value ?? null,
+          trackedItemId: row.tracked_item_id ?? null,
+          trackedSellerId:
+            row.tracked_seller_id === null || row.tracked_seller_id === undefined
+              ? null
+              : Number(row.tracked_seller_id),
+        });
       } else {
         itemIds.push(parsed.id.toUpperCase());
       }

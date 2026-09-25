@@ -3,7 +3,9 @@ import { sql } from "@/lib/db";
 import { ensureSchema } from "@/lib/ensure-schema";
 import { isLoggedIn } from "@/lib/auth";
 import {
+  fetchOfferChoices,
   getAccessToken,
+  hintedItemId,
   parseMlLink,
   previewItem,
   previewOwnItem,
@@ -29,6 +31,7 @@ export async function GET() {
       `SELECT w.id, w.kind, w.value, w.label, w.notes, w.ml_id, w.active,
               COALESCE(w.id_kind, 'item') AS id_kind,
               w.own_ml_id, w.own_url,
+              w.tracked_item_id, w.tracked_seller_id, w.tracked_seller,
               w.created_at,
               l.title, l.price, l.seller, l.ml_status, l.status,
               l.available_quantity, l.url, l.last_seen_at
@@ -91,6 +94,23 @@ export async function POST(req: Request) {
    * usuario: elegir tiene que ser un click.
    */
   const ownLinkFromBody = String(body?.own_url ?? "").trim() || null;
+
+  /**
+   * El vendedor elegido dentro de la ficha. Viene cuando la persona hizo
+   * click en una de las ofertas de la lista.
+   *
+   * Es el dato central de esta version: una ficha de catalogo la comparten
+   * decenas de vendedores, y se compite contra uno concreto. Sin esto, la
+   * app seguia "la oferta mas barata del dia", que puede ser de un vendedor
+   * distinto cada vez.
+   */
+  const trackedItemId =
+    String(body?.tracked_item_id ?? "").trim().toUpperCase() || null;
+  const trackedSellerId =
+    body?.tracked_seller_id === undefined || body?.tracked_seller_id === null
+      ? null
+      : Number(body.tracked_seller_id);
+
   const chosenProductId = String(body?.product_id ?? "").trim().toUpperCase();
   if (chosenProductId) {
     if (!/^ML[A-Z]\d{4,}$/.test(chosenProductId)) {
@@ -99,7 +119,17 @@ export async function POST(req: Request) {
         { status: 400 }
       );
     }
-    return addProduct(chosenProductId, "product", raw || null, ownLinkFromBody);
+    // Si todavia no eligio vendedor, se le ofrecen las ofertas de la ficha.
+    if (!trackedItemId) {
+      return ofrecerVendedores(chosenProductId, raw || null);
+    }
+    return addProduct(
+      chosenProductId,
+      "product",
+      raw || null,
+      ownLinkFromBody,
+      { itemId: trackedItemId, sellerId: trackedSellerId }
+    );
   }
 
   if (!raw) {
@@ -150,7 +180,62 @@ export async function POST(req: Request) {
       effectiveKind = parsed.kind === "product" ? "product" : "item";
     }
 
-    return addProduct(effectiveId, effectiveKind, raw, ownLinkFromBody);
+    // Una ficha de catalogo necesita saber a que vendedor seguir. Si el
+    // link traia la pista del vendedor (wid= / pdp_filters=item_id:), se
+    // usa; si no, se devuelven las ofertas para elegir con un click.
+    if (effectiveKind === "product" && !trackedItemId) {
+      const pista = hintedItemId(raw);
+      if (pista) {
+        return addProduct(effectiveId, "product", raw, ownLinkFromBody, {
+          itemId: pista,
+          sellerId: null,
+        });
+      }
+      return ofrecerVendedores(effectiveId, raw);
+    }
+
+    return addProduct(effectiveId, effectiveKind, raw, ownLinkFromBody, {
+      itemId: trackedItemId,
+      sellerId: trackedSellerId,
+    });
+  } catch (err) {
+    return NextResponse.json(
+      { error: err instanceof Error ? err.message : String(err) },
+      { status: 500 }
+    );
+  }
+}
+
+/**
+ * Devuelve las ofertas de una ficha para que la persona elija a quién
+ * seguir con un click.
+ *
+ * No es un error: es un paso del alta. Por eso responde 200 con
+ * `needs_pick`, y no un 400 que la pantalla mostraria en rojo.
+ */
+async function ofrecerVendedores(productId: string, sourceUrl: string | null) {
+  try {
+    const token = await getAccessToken(query);
+    const r = await fetchOfferChoices(productId, token);
+    if (!r.ok) {
+      return NextResponse.json({ error: r.error }, { status: 400 });
+    }
+    if (r.offers.length === 0) {
+      return NextResponse.json(
+        {
+          error:
+            `La ficha ${productId} no tiene ofertas activas: no hay a quién seguir.`,
+        },
+        { status: 400 }
+      );
+    }
+    return NextResponse.json({
+      needs_pick: true,
+      product_id: productId,
+      product_name: r.product_name,
+      source_url: sourceUrl,
+      offers: r.offers,
+    });
   } catch (err) {
     return NextResponse.json(
       { error: err instanceof Error ? err.message : String(err) },
@@ -167,7 +252,8 @@ async function addProduct(
   id: string,
   kind: "item" | "product",
   sourceUrl: string | null,
-  ownRef: string | null = null
+  ownRef: string | null = null,
+  tracked: { itemId?: string | null; sellerId?: number | null } = {}
 ) {
   try {
     const token = await getAccessToken(query);
@@ -197,24 +283,36 @@ async function addProduct(
       );
     }
 
-    const preview = await previewItem(id, token, kind, sourceUrl);
+    const preview = await previewItem(id, token, kind, sourceUrl, tracked);
     if (!preview.ok) {
       return NextResponse.json({ error: preview.error }, { status: 400 });
     }
 
     const l = preview.listing;
 
+    // El vendedor se guarda resuelto: si se eligio por publicacion, su
+    // seller_id sale de la propia respuesta de ML.
+    const trackedItemId = tracked.itemId ?? null;
+    const trackedSellerId =
+      tracked.sellerId ?? (l.seller_id != null ? Number(l.seller_id) : null);
+
     await query(
-      `INSERT INTO watchlist (kind, value, label, notes, ml_id, id_kind, own_ml_id, own_url, active)
-       VALUES ('url', $1, $2, $3, $4, $5, $6, $7, TRUE)
+      `INSERT INTO watchlist (kind, value, label, notes, ml_id, id_kind,
+                              own_ml_id, own_url,
+                              tracked_item_id, tracked_seller_id, tracked_seller,
+                              active)
+       VALUES ('url', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, TRUE)
        ON CONFLICT (kind, value) DO UPDATE
-         SET active    = TRUE,
-             label     = EXCLUDED.label,
-             notes     = EXCLUDED.notes,
-             ml_id     = EXCLUDED.ml_id,
-             id_kind   = EXCLUDED.id_kind,
-             own_ml_id = COALESCE(EXCLUDED.own_ml_id, watchlist.own_ml_id),
-             own_url   = COALESCE(EXCLUDED.own_url, watchlist.own_url)`,
+         SET active            = TRUE,
+             label             = EXCLUDED.label,
+             notes             = EXCLUDED.notes,
+             ml_id             = EXCLUDED.ml_id,
+             id_kind           = EXCLUDED.id_kind,
+             own_ml_id         = COALESCE(EXCLUDED.own_ml_id, watchlist.own_ml_id),
+             own_url           = COALESCE(EXCLUDED.own_url, watchlist.own_url),
+             tracked_item_id   = EXCLUDED.tracked_item_id,
+             tracked_seller_id = EXCLUDED.tracked_seller_id,
+             tracked_seller    = EXCLUDED.tracked_seller`,
       [
         sourceUrl || l.url || id,
         String(l.title).slice(0, 300),
@@ -223,6 +321,9 @@ async function addProduct(
         preview.kind,
         ownMlId,
         ownUrl,
+        trackedItemId,
+        trackedSellerId,
+        l.seller ?? null,
       ]
     );
 
@@ -250,6 +351,9 @@ async function addProduct(
       kind: preview.kind,
       own_ml_id: ownMlId,
       own_url: ownUrl,
+      tracked_item_id: trackedItemId,
+      tracked_seller_id: trackedSellerId,
+      tracked_seller: l.seller ?? null,
       listing: {
         title: l.title,
         price: l.price,

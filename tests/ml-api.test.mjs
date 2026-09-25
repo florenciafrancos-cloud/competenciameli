@@ -37,6 +37,8 @@ import {
   fetchOwnItems,
   previewOwnItem,
   fetchMyItemsFromMl,
+  fetchOfferChoices,
+  precioConEnvio,
 } from "../lib/ml-api";
 import {
   diffAgainst,
@@ -151,6 +153,13 @@ function putOffers(id, offers) {
       listing_type_id: "gold_special",
       international_delivery_mode: "none",
       tier: "",
+      official_store_id: o.official_store_id ?? null,
+      // Forma REAL del envio, verificada el 25/09/2026 en MLA58102043.
+      shipping: {
+        free_shipping: o.free_shipping ?? false,
+        mode: "me2",
+        cost: o.shipping_cost ?? 0,
+      },
     }))
   );
 }
@@ -1474,6 +1483,196 @@ await test("CRITICO: un precio de referencia 0 no da 100% ni infinito", () => {
 
 await test("un precio de referencia no numerico tampoco", () => {
   assert.deepEqual(diffAgainst(68000, Number.NaN), { diff_abs: null, diff_pct: null });
+});
+
+// ===============================================================
+// Seguir a UN VENDEDOR dentro de la ficha (v17)
+// ===============================================================
+//
+// El cambio nace de un caso real: la ficha MLA58102043 (Contigo
+// Matterhorn 591ml) tiene 67 ofertas. La mas barata era $29.950 de un
+// vendedor suelto CON $8.490 de envio; la que Mercado Libre destacaba
+// arriba era de $42.649. La app mostraba $29.950 y eso no es contra quien
+// se compite.
+//
+// Verificado ademas el 25/09/2026 con el token real: `buy_box_winner`
+// viene NULL, asi que la oferta destacada por ML no se puede obtener. La
+// salida es elegir el vendedor a mano y seguirlo a el.
+
+console.log("\n== Seguir a un vendedor puntual ==");
+
+const FICHA = "MLA90000001";
+putCatalog(FICHA, { name: "Botella Termica Contigo Matterhorn 591ml" });
+putOffers(FICHA, [
+  // Barata pero con envio caro: no es la mas barata de verdad.
+  { item_id: "MLA800000001", seller_id: 888, price: 29950, free_shipping: false, shipping_cost: 8490 },
+  { item_id: "MLA800000002", seller_id: 999, price: 35000, free_shipping: true },
+  { item_id: "MLA800000003", seller_id: 555, price: 42649, free_shipping: true, official_store_id: 12 },
+]);
+
+await test("sin vendedor elegido sigue tomando la mas barata (compatibilidad)", async () => {
+  const r = await fetchCatalogProduct(FICHA, await getAccessToken(q));
+  assert.equal(r.ok, true);
+  assert.equal(r.listing.price, 29950);
+  assert.equal(r.pick, "mas-barata");
+});
+
+await test("CRITICO: con vendedor elegido reporta SU precio, no el mas barato", async () => {
+  const r = await fetchCatalogProduct(FICHA, await getAccessToken(q), {
+    trackedItemId: "MLA800000003",
+    trackedSellerId: 555,
+  });
+  assert.equal(r.ok, true);
+  assert.equal(r.listing.price, 42649, "tomo el precio equivocado");
+  assert.equal(r.listing.seller_id, 555);
+  assert.equal(r.pick, "seguida");
+});
+
+await test("si el vendedor republica con otro ID, lo vuelve a encontrar", async () => {
+  // Mismo vendedor 999, publicacion nueva: no es una baja.
+  putOffers(FICHA, [
+    { item_id: "MLA800000001", seller_id: 888, price: 29950, free_shipping: false, shipping_cost: 8490 },
+    { item_id: "MLA800000099", seller_id: 999, price: 36500, free_shipping: true },
+  ]);
+  const r = await fetchCatalogProduct(FICHA, await getAccessToken(q), {
+    trackedItemId: "MLA800000002",
+    trackedSellerId: 999,
+  });
+  assert.equal(r.ok, true);
+  assert.equal(r.listing.price, 36500);
+  assert.equal(r.pick, "seguida-nuevo-id");
+  assert.ok(
+    r.warnings.some((w) => /cambió de publicación/i.test(w)),
+    "no aviso del cambio de publicacion"
+  );
+});
+
+await test("CRITICO: si el vendedor se fue, NO se cae a otra oferta", async () => {
+  // Es el error mas caro posible: cambiar de competidor en silencio haria
+  // que la serie de precios mezcle vendedores y que "bajo el precio"
+  // signifique en realidad "entro otro mas barato".
+  const r = await fetchCatalogProduct(FICHA, await getAccessToken(q), {
+    trackedItemId: "MLA800000003",
+    trackedSellerId: 555,
+  });
+  assert.equal(r.ok, false);
+  assert.equal(r.status, 404);
+  assert.match(r.error, /vendedor que seguís/i);
+});
+
+await test("el precio con envio es el que hace comparables dos ofertas", () => {
+  assert.equal(
+    precioConEnvio({ price: 29950, free_shipping: false, shipping_cost: 8490 }),
+    38440
+  );
+  assert.equal(precioConEnvio({ price: 35000, free_shipping: true }), 35000);
+});
+
+console.log("\n== Lista de vendedores para elegir ==");
+
+await test("lista las ofertas con nombre de vendedor y precio con envio", async () => {
+  putOffers(FICHA, [
+    { item_id: "MLA800000001", seller_id: 888, price: 29950, free_shipping: false, shipping_cost: 8490 },
+    { item_id: "MLA800000002", seller_id: 999, price: 35000, free_shipping: true },
+    { item_id: "MLA800000003", seller_id: 555, price: 42649, free_shipping: true, official_store_id: 12 },
+  ]);
+  const r = await fetchOfferChoices(FICHA, await getAccessToken(q));
+  assert.equal(r.ok, true);
+  assert.equal(r.offers.length, 3);
+  // Primera por precio real: $35.000 con envio gratis, no la de $29.950
+  // que con envio termina en $38.440.
+  assert.equal(r.offers[0].seller, "MUGSHOP");
+  assert.equal(r.offers[0].price_total, 35000);
+  assert.equal(r.offers[1].seller, "CHARCO");
+  assert.equal(r.offers[1].price_total, 38440);
+});
+
+await test("CRITICO: ordena por precio REAL, no por el de lista", async () => {
+  // $29.950 + $8.490 de envio = $38.440, o sea mas caro que el de $35.000.
+  // Ordenar por precio de lista pondria primera una oferta que no es la
+  // mas barata, que es justo el malentendido que origino esta version.
+  const r = await fetchOfferChoices(FICHA, await getAccessToken(q));
+  assert.deepEqual(
+    r.offers.map((o) => o.item_id),
+    ["MLA800000002", "MLA800000001", "MLA800000003"]
+  );
+});
+
+await test("marca cual es tienda oficial", async () => {
+  const r = await fetchOfferChoices(FICHA, await getAccessToken(q));
+  const oficial = r.offers.find((o) => o.item_id === "MLA800000003");
+  assert.equal(oficial.official_store, true);
+});
+
+await test("si ML no habilita los nombres, devuelve null y no rompe", async () => {
+  sellersForbidden = true;
+  const r = await fetchOfferChoices(FICHA, await getAccessToken(q));
+  sellersForbidden = false;
+  assert.equal(r.ok, true);
+  assert.equal(r.offers[0].seller, null);
+  assert.ok(r.offers[0].seller_id, "sin nombre, al menos tiene que quedar el ID");
+});
+
+await test("una ficha sin ofertas explica que no hay a quien seguir", async () => {
+  const vacia = "MLA90000002";
+  putCatalog(vacia, { name: "Ficha sin vendedores" });
+  const r = await fetchOfferChoices(vacia, await getAccessToken(q));
+  assert.equal(r.ok, false);
+  assert.match(r.error, /no tiene ofertas activas|a quién seguir/i);
+});
+
+console.log("\n== La corrida diaria respeta el vendedor elegido ==");
+
+await test("la corrida sigue al vendedor guardado en la lista", async () => {
+  putOffers(FICHA, [
+    { item_id: "MLA800000001", seller_id: 888, price: 29950, free_shipping: false, shipping_cost: 8490 },
+    { item_id: "MLA800000003", seller_id: 555, price: 42649, free_shipping: true },
+  ]);
+  await q(`DELETE FROM watchlist WHERE value = $1`, ["ficha-vendedor"]);
+  await q(
+    `INSERT INTO watchlist (kind, value, label, ml_id, id_kind,
+                            tracked_item_id, tracked_seller_id, active)
+     VALUES ('url', 'ficha-vendedor', 'Contigo Matterhorn', $1, 'product', $2, $3, TRUE)`,
+    [FICHA, "MLA800000003", 555]
+  );
+
+  const r = await runScan(q, { runId: "v17-1" });
+  const fila = await q(`SELECT price FROM listings WHERE ml_id = $1`, [FICHA]);
+  assert.equal(
+    Number(fila.rows[0].price),
+    42649,
+    "la corrida tomo la mas barata en vez del vendedor elegido"
+  );
+});
+
+await test("detecta que ESE vendedor bajo el precio", async () => {
+  putOffers(FICHA, [
+    { item_id: "MLA800000001", seller_id: 888, price: 29950, free_shipping: false, shipping_cost: 8490 },
+    { item_id: "MLA800000003", seller_id: 555, price: 39900, free_shipping: true },
+  ]);
+  const r = await runScan(q, { runId: "v17-2" });
+  const c = r.ingest.changes.find(
+    (x) => x.ml_id === FICHA && x.change_type === "price_down"
+  );
+  assert.ok(c, "no detecto la baja del vendedor seguido");
+  assert.equal(Number(c.new_value), 39900);
+});
+
+await test("si el vendedor seguido se va, lo reporta y avisa por que", async () => {
+  putOffers(FICHA, [
+    { item_id: "MLA800000001", seller_id: 888, price: 29950, free_shipping: false, shipping_cost: 8490 },
+  ]);
+  const r = await runScan(q, { runId: "v17-3" });
+  assert.ok(
+    r.warnings.some((w) => /vendedor que seguís/i.test(w)),
+    `no explico por que: ${r.warnings.join(" | ")}`
+  );
+  const fila = await q(`SELECT price FROM listings WHERE ml_id = $1`, [FICHA]);
+  assert.equal(
+    Number(fila.rows[0].price),
+    39900,
+    "CRITICO: se cambio solo de vendedor en vez de reportar la ausencia"
+  );
 });
 
 // ---------------------------------------------------------------
